@@ -2,7 +2,7 @@ import { QRCodeCanvas } from "qrcode.react";
 
 function QRGenerator() {
 
-  const domain = "http://localhost:5173";
+  const domain = "https://restaurant-system.anakmdr06.workers.dev";
 
   const tables = Array.from(
     { length: 20 },
