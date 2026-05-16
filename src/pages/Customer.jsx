@@ -43,25 +43,24 @@ const foods = [
 
 const CATS = ["Semua", "Nasi", "Mee", "Western", "Roti", "Lauk", "Minuman", "Dessert"];
 
-const CAT_COLOR = {
-  Semua: "#1e293b", Nasi: "#b45309", Mee: "#dc2626",
-  Western: "#6d28d9", Roti: "#92400e", Lauk: "#065f46",
-  Minuman: "#1d4ed8", Dessert: "#be185d",
+const CAT_EMOJI = {
+  Semua: "🍽️", Nasi: "🍚", Mee: "🍜", Western: "🍔",
+  Roti: "🫓", Lauk: "🐟", Minuman: "🧃", Dessert: "🍮",
 };
 
-const BADGE_STYLE = {
-  "Terlaris":    { bg: "#1e293b", txt: "#fff" },
-  "Baru":        { bg: "#2563eb", txt: "#fff" },
-  "Pedas":       { bg: "#dc2626", txt: "#fff" },
-  "Pilihan Chef":{ bg: "#065f46", txt: "#fff" },
-  "Bermusim":    { bg: "#be185d", txt: "#fff" },
-  "Semulajadi":  { bg: "#15803d", txt: "#fff" },
+const BADGE_CONFIG = {
+  "Terlaris":     { bg: "#C0392B", txt: "#FFF5F0" },
+  "Baru":         { bg: "#1A6B4A", txt: "#F0FFF8" },
+  "Pedas":        { bg: "#B7410E", txt: "#FFF3EE" },
+  "Pilihan Chef": { bg: "#5C3317", txt: "#FDF0E6" },
+  "Bermusim":     { bg: "#7B3F8C", txt: "#FAF0FF" },
+  "Semulajadi":   { bg: "#2E7D32", txt: "#F1FFF3" },
 };
 
 const TEMP_OPTS = [
-  { val: "hot",  label: "Panas ☕" },
-  { val: "cold", label: "Sejuk 🧊" },
-  { val: "iced", label: "Ais 🥤" },
+  { val: "hot",  label: "☕ Panas" },
+  { val: "cold", label: "🧊 Sejuk" },
+  { val: "iced", label: "🥤 Ais" },
 ];
 
 // ─── ETA COUNTDOWN HOOK ──────────────────────────────────────────────────────
@@ -82,25 +81,45 @@ function useCountdown(readyAt) {
   return { done: false, label: `${m}:${String(s).padStart(2, "0")}`, mins: m, secs: s, pct: null };
 }
 
-// ─── COMPONENT ───────────────────────────────────────────────────────────────
+// ─── ETA PROGRESS BAR ────────────────────────────────────────────────────────
+function EtaProgressBar({ readyAt, etaMins }) {
+  const [pct, setPct] = useState(0);
+  useEffect(() => {
+    const update = () => {
+      const target  = (readyAt?.toDate ? readyAt.toDate() : new Date(readyAt)).getTime();
+      const total   = (etaMins || 1) * 60 * 1000;
+      const start   = target - total;
+      const elapsed = Date.now() - start;
+      setPct(Math.min(100, Math.max(0, (elapsed / total) * 100)));
+    };
+    update();
+    const t = setInterval(update, 1000);
+    return () => clearInterval(t);
+  }, [readyAt, etaMins]);
+
+  return (
+    <div style={ss.progressTrack}>
+      <div style={{ ...ss.progressFill, width: `${pct}%` }} />
+    </div>
+  );
+}
+
+// ─── MAIN COMPONENT ──────────────────────────────────────────────────────────
 function Customer() {
   const { tableId } = useParams();
 
   const [cart, setCart]             = useState({});
   const [activeCat, setActiveCat]   = useState("Semua");
-  const [screen, setScreen]         = useState("menu"); // menu | cart | success
+  const [screen, setScreen]         = useState("menu");
   const [note, setNote]             = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [tempPref, setTempPref]     = useState({});
-  const [expandedId, setExpandedId] = useState(null);
   const catBarRef                   = useRef(null);
 
-  // Track the last submitted order doc for real-time ETA
   const [orderId, setOrderId]       = useState(null);
   const [orderDoc, setOrderDoc]     = useState(null);
   const [lastTotal, setLastTotal]   = useState(0);
 
-  // Live listener for the submitted order (ETA updates from admin)
   useEffect(() => {
     if (!orderId) return;
     const unsub = onSnapshot(doc(db, "orders", orderId), snap => {
@@ -111,13 +130,13 @@ function Customer() {
 
   const countdown = useCountdown(orderDoc?.readyAt ?? null);
 
-  const filtered   = activeCat === "Semua" ? foods : foods.filter(f => f.cat === activeCat);
-  const total      = foods.reduce((s, f) => s + f.price * (cart[f.id] || 0), 0);
-  const totalQty   = Object.values(cart).reduce((s, v) => s + v, 0);
-  const cartItems  = foods.filter(f => cart[f.id]);
+  const filtered  = activeCat === "Semua" ? foods : foods.filter(f => f.cat === activeCat);
+  const total     = foods.reduce((s, f) => s + f.price * (cart[f.id] || 0), 0);
+  const totalQty  = Object.values(cart).reduce((s, v) => s + v, 0);
+  const cartItems = foods.filter(f => cart[f.id]);
 
-  const getTemp  = (id) => tempPref[id] || "hot";
-  const setTemp  = (id, val) => setTempPref(p => ({ ...p, [id]: val }));
+  const getTemp = (id) => tempPref[id] || "hot";
+  const setTemp = (id, val) => setTempPref(p => ({ ...p, [id]: val }));
 
   const add = (id) => setCart(p => ({ ...p, [id]: (p[id] || 0) + 1 }));
   const dec = (id) => setCart(p => {
@@ -146,20 +165,18 @@ function Customer() {
         table: tableId, items, total, note, status: "pending", createdAt: new Date(),
       });
       setLastTotal(total);
-      setOrderId(ref.id);     // start listening to this order
-      setOrderDoc(null);      // reset (listener will populate)
+      setOrderId(ref.id);
+      setOrderDoc(null);
       setCart({}); setNote("");
       setScreen("success");
     } catch (e) { console.error(e); }
     setSubmitting(false);
   };
 
-  // ── SUCCESS SCREEN ──────────────────────────────────────────────────────────
+  // ── SUCCESS SCREEN ─────────────────────────────────────────────────────────
   if (screen === "success") {
-    const etaMins = orderDoc?.etaMins ?? null;
     const readyAt = orderDoc?.readyAt ?? null;
-
-    // Format ready time
+    const etaMins = orderDoc?.etaMins ?? null;
     const fmtReadyTime = (ts) => {
       if (!ts) return null;
       const d = ts.toDate ? ts.toDate() : new Date(ts);
@@ -171,75 +188,64 @@ function Customer() {
         <style>{globalCss}</style>
         <div style={ss.successBox}>
 
-          {/* Check / clock icon */}
+          {/* Decorative top strip */}
+          <div style={ss.successTopAccent} />
+
+          {/* Icon circle */}
           {countdown?.done ? (
-            <div style={{ ...ss.checkCircle, background: "#16a34a" }}>
-              <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round">
-                <polyline points="20 6 9 17 4 12"/>
-              </svg>
+            <div style={{ ...ss.checkCircle, background: "#1A6B4A" }}>
+              <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#F0FFF8" strokeWidth="2.5" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
             </div>
           ) : (
-            <div style={{ ...ss.checkCircle, background: "#1e293b" }}>
-              <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="1.8" strokeLinecap="round">
-                <circle cx="12" cy="12" r="10"/>
-                <polyline points="12 6 12 12 16 14"/>
-              </svg>
+            <div style={{ ...ss.checkCircle, background: "#5C3317" }}>
+              <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#FDF0E6" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
             </div>
           )}
 
           <div style={ss.successTitle}>
-            {countdown?.done ? "Pesanan Dah Siap! 🎉" : "Pesanan Dihantar!"}
+            {countdown?.done ? "Pesanan Siap! 🎉" : "Pesanan Dihantar!"}
           </div>
-          <div style={ss.successSub}>Meja {tableId} · Sila tunggu sebentar</div>
+          <div style={ss.successTableTag}>Meja {tableId}</div>
           <div style={ss.successAmt}>RM {lastTotal.toFixed(2)}</div>
 
-          {/* ETA Block — shows when admin sets it */}
           {readyAt && countdown && !countdown.done && (
             <div style={ss.etaCard}>
-              <div style={ss.etaCardTop}>
-                <span style={ss.etaCardIcon}>⏱</span>
-                <span style={ss.etaCardTitle}>Masa Anggaran Siap</span>
-              </div>
-              {/* Big countdown */}
+              <div style={ss.etaCardLabel}>⏱ Masa Anggaran Siap</div>
               <div style={ss.etaCountdown}>{countdown.label}</div>
-              <div style={ss.etaReadyAt}>Dijangka siap pada {fmtReadyTime(readyAt)}</div>
-              <div style={ss.etaBarWrap}>
-                <EtaProgressBar readyAt={readyAt} etaMins={etaMins} />
-              </div>
-              <div style={ss.etaHint}>Halaman ini dikemaskini secara automatik</div>
+              <div style={ss.etaReadyAt}>Dijangka siap: {fmtReadyTime(readyAt)}</div>
+              <EtaProgressBar readyAt={readyAt} etaMins={etaMins} />
+              <div style={ss.etaHint}>Dikemaskini secara automatik</div>
             </div>
           )}
 
-          {/* Done state */}
           {countdown?.done && (
-            <div style={{ ...ss.etaCard, background: "#f0fdf4", border: "1.5px solid #86efac" }}>
-              <div style={ss.etaDoneMsg}>
+            <div style={{ ...ss.etaCard, background: "#F0FFF8", borderColor: "#6FCF97" }}>
+              <div style={{ fontSize: 15, fontWeight: 600, color: "#1A6B4A", lineHeight: 1.7, textAlign: "center" }}>
                 🍽️ Pesanan anda sedang dibawa ke meja.<br />Selamat menjamu selera!
               </div>
             </div>
           )}
 
-          {/* Waiting — no ETA yet */}
           {!readyAt && (
             <div style={ss.waitingCard}>
               <div style={ss.waitingDots}>
                 <span className="dot" /><span className="dot" /><span className="dot" />
               </div>
-              <div style={ss.waitingTxt}>Menunggu pengesahan masa dari dapur...</div>
+              <div style={ss.waitingTxt}>Menunggu pengesahan dari dapur...</div>
             </div>
           )}
 
-          <div style={ss.successNote}>Staf kami sedang menyediakan pesanan anda</div>
+          <div style={ss.successNote}>Staf kami sedang menyediakan pesanan anda dengan penuh kasih sayang 🌿</div>
 
           <button onClick={() => setScreen("menu")} style={ss.backToMenuBtn}>
-            Kembali ke Menu
+            ← Kembali ke Menu
           </button>
         </div>
       </div>
     );
   }
 
-  // ── CART SCREEN ─────────────────────────────────────────────────────────────
+  // ── CART SCREEN ────────────────────────────────────────────────────────────
   if (screen === "cart") {
     return (
       <div style={ss.page}>
@@ -247,20 +253,21 @@ function Customer() {
 
         <div style={ss.cartHdr}>
           <button onClick={() => setScreen("menu")} style={ss.backBtn}>
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="15 18 9 12 15 6"/></svg>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#5C3317" strokeWidth="2.5" strokeLinecap="round"><polyline points="15 18 9 12 15 6"/></svg>
           </button>
-          <div style={ss.cartHdrTitle}>Pesanan Anda</div>
-          <div style={ss.cartHdrSub}>Meja {tableId}</div>
+          <div>
+            <div style={ss.cartHdrTitle}>Pesanan Anda</div>
+            <div style={ss.cartHdrSub}>Meja {tableId}</div>
+          </div>
+          <div style={ss.cartHdrBadge}>{totalQty}</div>
         </div>
 
         <div style={ss.cartBody}>
           {cartItems.length === 0 ? (
             <div style={ss.emptyState}>
-              <div style={ss.emptyIco}>
-                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#cbd5e1" strokeWidth="1.5"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>
-              </div>
-              <div style={ss.emptyTxt}>Keranjang kosong</div>
-              <div style={ss.emptyHint}>Pilih hidangan dari menu</div>
+              <div style={ss.emptyIco}>🛒</div>
+              <div style={ss.emptyTxt}>Keranjang Kosong</div>
+              <div style={ss.emptyHint}>Pilih hidangan dari menu kami</div>
               <button onClick={() => setScreen("menu")} style={ss.goMenuBtn}>Lihat Menu</button>
             </div>
           ) : (
@@ -328,7 +335,7 @@ function Customer() {
           <div style={ss.cartFooter}>
             <button onClick={submitOrder} disabled={submitting} style={ss.confirmBtn}>
               {submitting
-                ? <span>Menghantar pesanan...</span>
+                ? <span style={{ opacity: 0.7 }}>Menghantar pesanan...</span>
                 : <><span>Hantar Pesanan</span><span style={ss.confirmAmt}>RM {total.toFixed(2)}</span></>
               }
             </button>
@@ -338,17 +345,20 @@ function Customer() {
     );
   }
 
-  // ── MENU SCREEN ─────────────────────────────────────────────────────────────
+  // ── MENU SCREEN ────────────────────────────────────────────────────────────
   return (
     <div style={ss.page}>
       <style>{globalCss}</style>
 
+      {/* Header */}
       <div style={ss.hdr}>
         <div style={ss.hdrLeft}>
-          <div style={ss.brandMark}>WS</div>
+          <div style={ss.brandMark}>
+            <span style={ss.brandMarkText}>WS</span>
+          </div>
           <div>
             <div style={ss.brandName}>Warung Selera</div>
-            <div style={ss.brandSub}>Ipoh, Perak</div>
+            <div style={ss.brandSub}>✦ Ipoh, Perak ✦</div>
           </div>
         </div>
         <div style={ss.tablePill}>
@@ -357,6 +367,14 @@ function Customer() {
         </div>
       </div>
 
+      {/* Hero Banner */}
+      <div style={ss.heroBanner}>
+        <div style={ss.heroBannerInner}>
+          <div style={ss.heroText}>Lapar? Kami ada <em>hidangan istimewa</em> untuk anda 🌿</div>
+        </div>
+      </div>
+
+      {/* Category Bar */}
       <div style={ss.catBar} ref={catBarRef}>
         {CATS.map(cat => {
           const active = activeCat === cat;
@@ -368,54 +386,53 @@ function Customer() {
               onClick={() => selectCat(cat)}
               style={{
                 ...ss.catChip,
-                background: active ? CAT_COLOR[cat] : "#f1f5f9",
-                color: active ? "#fff" : "#475569",
-                fontWeight: active ? 700 : 500,
+                ...(active ? ss.catChipActive : {}),
               }}
             >
-              {cat}
+              <span style={ss.catEmoji}>{CAT_EMOJI[cat]}</span>
+              <span>{cat}</span>
               <span style={{
                 ...ss.catChipCount,
-                background: active ? "rgba(255,255,255,0.25)" : "#e2e8f0",
-                color: active ? "#fff" : "#94a3b8",
+                ...(active ? ss.catChipCountActive : {}),
               }}>{count}</span>
             </button>
           );
         })}
       </div>
 
+      {/* Section Head */}
       <div style={ss.sectionHead}>
         <span style={ss.sectionHeadTxt}>{activeCat === "Semua" ? "Semua Menu" : activeCat}</span>
         <span style={ss.sectionHeadCount}>{filtered.length} hidangan</span>
       </div>
 
+      {/* Food List */}
       <div style={ss.foodList}>
         {filtered.map(food => {
-          const q        = cart[food.id] || 0;
-          const temp     = getTemp(food.id);
-          const expanded = expandedId === food.id;
-          const badgeCfg = food.badge ? BADGE_STYLE[food.badge] : null;
+          const q = cart[food.id] || 0;
+          const temp = getTemp(food.id);
+          const badgeCfg = food.badge ? BADGE_CONFIG[food.badge] : null;
 
           return (
             <div key={food.id} style={ss.foodCard} className="food-card">
-              <div style={ss.foodImgWrap} onClick={() => setExpandedId(expanded ? null : food.id)}>
+              {/* Image */}
+              <div style={ss.foodImgWrap}>
                 <img src={food.img} alt={food.name} style={ss.foodImg} loading="lazy"
                   onError={e => e.target.style.display = "none"} />
+                <div style={ss.foodImgOverlay} />
                 {badgeCfg && (
                   <span style={{ ...ss.foodBadge, background: badgeCfg.bg, color: badgeCfg.txt }}>
                     {food.badge}
                   </span>
                 )}
-                {food.cat === "Minuman" && (
-                  <span style={ss.drinkTag}>Minuman</span>
-                )}
+                <div style={ss.foodPriceTag}>
+                  RM {food.price.toFixed(2)}
+                </div>
               </div>
 
+              {/* Info */}
               <div style={ss.foodInfo}>
-                <div style={ss.foodInfoTop}>
-                  <div style={ss.foodName}>{food.name}</div>
-                  <div style={ss.foodPrice}>RM {food.price.toFixed(2)}</div>
-                </div>
+                <div style={ss.foodName}>{food.name}</div>
                 <div style={ss.foodDesc}>{food.desc}</div>
 
                 {food.tempOpts && (
@@ -427,7 +444,7 @@ function Customer() {
                         style={{
                           ...ss.tempBtn,
                           ...(temp === o.val
-                            ? o.val === "hot" ? ss.tempHot : ss.tempCold
+                            ? o.val === "hot" ? ss.tempHotActive : ss.tempColdActive
                             : {}),
                         }}
                       >
@@ -454,12 +471,13 @@ function Customer() {
             </div>
           );
         })}
-        <div style={{ height: 100 }} />
+        <div style={{ height: 120 }} />
       </div>
 
+      {/* Bottom Bar */}
       <div style={ss.bottomBar}>
         <div style={ss.bottomLeft}>
-          <div style={ss.bottomQty}>{totalQty === 0 ? "Tiada item" : `${totalQty} item dipilih`}</div>
+          <div style={ss.bottomQty}>{totalQty === 0 ? "Tiada item dipilih" : `${totalQty} item dipilih`}</div>
           <div style={ss.bottomTotal}>RM {total.toFixed(2)}</div>
         </div>
         <button
@@ -475,50 +493,29 @@ function Customer() {
   );
 }
 
-// ─── ETA PROGRESS BAR ────────────────────────────────────────────────────────
-// Animated progress bar from 0→100% as time counts down
-function EtaProgressBar({ readyAt, etaMins }) {
-  const [pct, setPct] = useState(0);
-
-  useEffect(() => {
-    const update = () => {
-      const target  = (readyAt?.toDate ? readyAt.toDate() : new Date(readyAt)).getTime();
-      const total   = (etaMins || 1) * 60 * 1000;
-      const start   = target - total;
-      const elapsed = Date.now() - start;
-      setPct(Math.min(100, Math.max(0, (elapsed / total) * 100)));
-    };
-    update();
-    const t = setInterval(update, 1000);
-    return () => clearInterval(t);
-  }, [readyAt, etaMins]);
-
-  return (
-    <div style={ss.progressTrack}>
-      <div style={{ ...ss.progressFill, width: `${pct}%` }} />
-    </div>
-  );
-}
-
 // ─── GLOBAL CSS ──────────────────────────────────────────────────────────────
 const globalCss = `
-  @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
+  @import url('https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,600;0,700;1,400;1,600&family=DM+Sans:wght@400;500;600;700&display=swap');
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   html, body, #root { height: 100%; }
-  body { font-family: 'Plus Jakarta Sans', sans-serif; background: #f8fafc; -webkit-font-smoothing: antialiased; }
+  body {
+    font-family: 'DM Sans', sans-serif;
+    background: #FBF6F0;
+    -webkit-font-smoothing: antialiased;
+  }
   ::-webkit-scrollbar { display: none; }
 
-  .food-card { transition: transform 0.15s ease; }
-  .food-card:active { transform: scale(0.985); }
-  .tap-btn:active { opacity: 0.8; transform: scale(0.97); }
+  .food-card { transition: transform 0.18s ease, box-shadow 0.18s ease; }
+  .food-card:active { transform: scale(0.985); box-shadow: 0 2px 8px rgba(92,51,23,0.10); }
+  .tap-btn:active { opacity: 0.82; transform: scale(0.97); }
 
   @keyframes fadeUp {
-    from { opacity: 0; transform: translateY(16px); }
+    from { opacity: 0; transform: translateY(18px); }
     to   { opacity: 1; transform: translateY(0); }
   }
   @keyframes popIn {
-    0%   { transform: scale(0.7); opacity: 0; }
-    80%  { transform: scale(1.05); }
+    0%   { transform: scale(0.6); opacity: 0; }
+    80%  { transform: scale(1.06); }
     100% { transform: scale(1); opacity: 1; }
   }
   @keyframes blink {
@@ -527,8 +524,8 @@ const globalCss = `
   }
   .dot {
     display: inline-block;
-    width: 8px; height: 8px;
-    background: #94a3b8;
+    width: 7px; height: 7px;
+    background: #C8A27A;
     border-radius: 50%;
     margin: 0 3px;
     animation: blink 1.4s ease-in-out infinite;
@@ -537,130 +534,829 @@ const globalCss = `
   .dot:nth-child(3) { animation-delay: 0.4s; }
 `;
 
+// ─── DESIGN TOKENS ───────────────────────────────────────────────────────────
+// Warm terracotta-cream Malaysian warung palette
+const T = {
+  bg:          "#FBF6F0",       // warm cream page bg
+  surface:     "#FFFFFF",       // card surface
+  surfaceWarm: "#FDF8F3",       // slightly warm surface
+  border:      "#EDE3D9",       // warm border
+  borderMid:   "#D4BEA8",       // mid border
+  primary:     "#5C3317",       // deep coffee brown (primary)
+  primaryHover:"#7A4520",
+  accent:      "#C0392B",       // terracotta red accent
+  accentLight: "#FAE8E7",
+  gold:        "#B8862A",       // warm gold for highlights
+  goldLight:   "#FDF4E0",
+  textDark:    "#2C1A0E",       // darkest text
+  textMid:     "#6B4226",       // mid brown text
+  textMuted:   "#A07850",       // muted warm text
+  textLight:   "#C8A27A",       // lightest text
+  green:       "#1A6B4A",
+  greenLight:  "#F0FFF8",
+};
+
 // ─── STYLES ──────────────────────────────────────────────────────────────────
 const ss = {
-  page:         { minHeight: "100dvh", background: "#f8fafc", display: "flex", flexDirection: "column", fontFamily: "'Plus Jakarta Sans', sans-serif", maxWidth: 480, margin: "0 auto", position: "relative" },
-
-  hdr:          { background: "#fff", padding: "14px 18px 12px", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "1px solid #f1f5f9", position: "sticky", top: 0, zIndex: 50 },
-  hdrLeft:      { display: "flex", alignItems: "center", gap: 10 },
-  brandMark:    { width: 40, height: 40, background: "#1e293b", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, fontWeight: 800, color: "#fff", letterSpacing: -0.5, flexShrink: 0 },
-  brandName:    { fontSize: 16, fontWeight: 800, color: "#1e293b", letterSpacing: -0.3, lineHeight: 1.2 },
-  brandSub:     { fontSize: 11, color: "#94a3b8", marginTop: 1 },
-  tablePill:    { background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 10, padding: "6px 14px", display: "flex", alignItems: "center", gap: 6 },
-  tablePillLbl: { fontSize: 11, color: "#94a3b8", fontWeight: 600, letterSpacing: 0.5 },
-  tablePillNum: { fontSize: 16, fontWeight: 800, color: "#1e293b" },
-
-  catBar:       { display: "flex", gap: 8, padding: "14px 18px", overflowX: "auto", background: "#fff", borderBottom: "1px solid #f1f5f9", position: "sticky", top: 66, zIndex: 40 },
-  catChip:      { display: "flex", alignItems: "center", gap: 6, padding: "9px 14px", borderRadius: 50, border: "none", cursor: "pointer", fontSize: 14, fontWeight: 500, whiteSpace: "nowrap", transition: "all 0.2s ease", flexShrink: 0 },
-  catChipCount: { fontSize: 11, fontWeight: 700, borderRadius: 20, padding: "1px 7px", transition: "all 0.2s" },
-
-  sectionHead:      { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 18px 8px" },
-  sectionHeadTxt:   { fontSize: 20, fontWeight: 800, color: "#1e293b", letterSpacing: -0.4 },
-  sectionHeadCount: { fontSize: 13, color: "#94a3b8", fontWeight: 500 },
-
-  foodList:    { padding: "0 18px", display: "flex", flexDirection: "column", gap: 14 },
-  foodCard:    { background: "#fff", borderRadius: 18, overflow: "hidden", boxShadow: "0 1px 4px rgba(0,0,0,0.06)", border: "1px solid #f1f5f9" },
-  foodImgWrap: { position: "relative", height: 190, overflow: "hidden", background: "#f0ece8" },
-  foodImg:     { width: "100%", height: "100%", objectFit: "cover", display: "block" },
-  foodBadge:   { position: "absolute", top: 12, left: 12, fontSize: 11, fontWeight: 700, padding: "4px 10px", borderRadius: 20, letterSpacing: 0.2 },
-  drinkTag:    { position: "absolute", bottom: 10, right: 10, background: "rgba(0,0,0,0.55)", color: "#fff", fontSize: 10, fontWeight: 600, padding: "3px 9px", borderRadius: 20, letterSpacing: 0.3 },
-
-  foodInfo:    { padding: "14px 16px 16px" },
-  foodInfoTop: { display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, marginBottom: 6 },
-  foodName:    { fontSize: 16, fontWeight: 700, color: "#1e293b", lineHeight: 1.3, flex: 1 },
-  foodPrice:   { fontSize: 17, fontWeight: 800, color: "#1e293b", flexShrink: 0 },
-  foodDesc:    { fontSize: 13, color: "#64748b", lineHeight: 1.6, marginBottom: 12 },
-
-  tempRow:  { display: "flex", gap: 6, marginBottom: 14 },
-  tempBtn:  { flex: 1, fontSize: 12, fontWeight: 600, padding: "8px 4px", borderRadius: 10, border: "1.5px solid #e2e8f0", background: "#f8fafc", color: "#64748b", cursor: "pointer", transition: "all 0.15s", textAlign: "center" },
-  tempHot:  { background: "#fff7ed", borderColor: "#fb923c", color: "#c2410c", fontWeight: 700 },
-  tempCold: { background: "#eff6ff", borderColor: "#60a5fa", color: "#1d4ed8", fontWeight: 700 },
-
-  foodAction: { display: "flex", justifyContent: "flex-end" },
-  addBtn:     { background: "#1e293b", color: "#fff", border: "none", borderRadius: 12, padding: "11px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer", letterSpacing: 0.1, transition: "all 0.15s", width: "100%" },
-  qtyRow:     { display: "flex", alignItems: "center", gap: 0, background: "#f1f5f9", borderRadius: 12, overflow: "hidden", width: "100%" },
-  qbLg:       { background: "transparent", border: "none", flex: 1, height: 46, fontSize: 22, fontWeight: 700, cursor: "pointer", color: "#1e293b", display: "flex", alignItems: "center", justifyContent: "center" },
-  qnLg:       { fontSize: 18, fontWeight: 800, color: "#1e293b", minWidth: 40, textAlign: "center" },
-
-  bottomBar:    { position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, background: "#fff", borderTop: "1px solid #f1f5f9", padding: "12px 18px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, zIndex: 60, boxShadow: "0 -4px 20px rgba(0,0,0,0.06)" },
-  bottomLeft:   {},
-  bottomQty:    { fontSize: 11, fontWeight: 600, color: "#94a3b8", letterSpacing: 0.3 },
-  bottomTotal:  { fontSize: 22, fontWeight: 800, color: "#1e293b", letterSpacing: -0.5 },
-  viewCartBtn:  { background: "#1e293b", color: "#fff", border: "none", borderRadius: 14, padding: "13px 22px", fontSize: 15, fontWeight: 700, cursor: "pointer", letterSpacing: 0.1, whiteSpace: "nowrap", transition: "all 0.15s" },
-  viewCartBtnOff:{ background: "#e2e8f0", color: "#94a3b8", cursor: "not-allowed" },
-
-  // Cart
-  cartHdr:     { background: "#fff", padding: "16px 18px 14px", borderBottom: "1px solid #f1f5f9", position: "sticky", top: 0, zIndex: 50 },
-  backBtn:     { background: "none", border: "none", cursor: "pointer", color: "#1e293b", padding: "0 0 2px", marginBottom: 4, display: "flex", alignItems: "center" },
-  cartHdrTitle:{ fontSize: 22, fontWeight: 800, color: "#1e293b", letterSpacing: -0.4 },
-  cartHdrSub:  { fontSize: 13, color: "#94a3b8", marginTop: 2 },
-  cartBody:    { flex: 1, overflowY: "auto", paddingBottom: 120 },
-  cartSection: { padding: "16px 18px 0" },
-  sectionLabel:{ fontSize: 11, fontWeight: 700, color: "#94a3b8", letterSpacing: 1, textTransform: "uppercase", marginBottom: 10 },
-  cartRow:     { display: "flex", alignItems: "center", gap: 12, background: "#fff", borderRadius: 14, padding: "12px", marginBottom: 10, border: "1px solid #f1f5f9", boxShadow: "0 1px 3px rgba(0,0,0,0.04)" },
-  cartThumb:   { width: 60, height: 60, borderRadius: 10, objectFit: "cover", flexShrink: 0, background: "#f0ece8" },
-  cartRowInfo: { flex: 1 },
-  cartRowName: { fontSize: 14, fontWeight: 700, color: "#1e293b", marginBottom: 2, lineHeight: 1.3 },
-  cartRowTemp: { fontSize: 12, color: "#2563eb", fontWeight: 600, marginBottom: 3 },
-  cartRowPrice:{ fontSize: 15, fontWeight: 800, color: "#1e293b" },
-  qRow:        { display: "flex", alignItems: "center", gap: 0, background: "#f8fafc", borderRadius: 10, border: "1px solid #e2e8f0", overflow: "hidden" },
-  qbCart:      { background: "transparent", border: "none", width: 34, height: 34, fontSize: 18, fontWeight: 800, cursor: "pointer", color: "#1e293b", display: "flex", alignItems: "center", justifyContent: "center" },
-  qnCart:      { fontSize: 15, fontWeight: 800, color: "#1e293b", minWidth: 28, textAlign: "center" },
-  noteInput:   { width: "100%", background: "#fff", border: "1.5px solid #e2e8f0", borderRadius: 14, padding: "12px 14px", fontSize: 14, resize: "none", outline: "none", fontFamily: "inherit", color: "#1e293b", lineHeight: 1.6, marginTop: 4 },
-  summaryCard: { background: "#fff", borderRadius: 14, padding: "16px", border: "1px solid #f1f5f9", marginTop: 4, boxShadow: "0 1px 3px rgba(0,0,0,0.04)" },
-  summaryLine: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 },
-  summaryKey:  { fontSize: 14, color: "#64748b" },
-  summaryVal:  { fontSize: 14, fontWeight: 600, color: "#1e293b" },
-  summaryKeyBold:{ fontSize: 15, fontWeight: 700, color: "#1e293b" },
-  summaryBig:  { fontSize: 22, fontWeight: 800, color: "#1e293b", letterSpacing: -0.5 },
-  divider:     { height: 1, background: "#f1f5f9", margin: "10px 0" },
-  cartFooter:  { position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, background: "#fff", padding: "12px 18px 24px", borderTop: "1px solid #f1f5f9", zIndex: 60 },
-  confirmBtn:  { width: "100%", background: "#1e293b", color: "#fff", border: "none", borderRadius: 16, padding: "16px 20px", fontSize: 16, fontWeight: 700, cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", letterSpacing: 0.1, transition: "opacity 0.15s" },
-  confirmAmt:  { fontSize: 16, fontWeight: 800 },
-
-  emptyState:  { display: "flex", flexDirection: "column", alignItems: "center", padding: "60px 20px", gap: 12 },
-  emptyIco:    { width: 80, height: 80, background: "#f8fafc", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", border: "2px solid #f1f5f9", marginBottom: 4 },
-  emptyTxt:    { fontSize: 18, fontWeight: 700, color: "#1e293b" },
-  emptyHint:   { fontSize: 14, color: "#94a3b8" },
-  goMenuBtn:   { marginTop: 8, background: "#1e293b", color: "#fff", border: "none", borderRadius: 12, padding: "12px 28px", fontSize: 15, fontWeight: 700, cursor: "pointer" },
-
-  // ── SUCCESS screen ────────────────────────────────────────────────────────
-  successPage:  { minHeight: "100dvh", background: "#f8fafc", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Plus Jakarta Sans', sans-serif", padding: 24 },
-  successBox:   { background: "#fff", borderRadius: 24, padding: "36px 28px 28px", textAlign: "center", width: "100%", maxWidth: 380, boxShadow: "0 4px 32px rgba(0,0,0,0.08)", animation: "fadeUp 0.4s ease", display: "flex", flexDirection: "column", gap: 8, alignItems: "center" },
-  checkCircle:  { width: 80, height: 80, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", animation: "popIn 0.5s ease", marginBottom: 4 },
-  successTitle: { fontSize: 24, fontWeight: 800, color: "#1e293b", letterSpacing: -0.5 },
-  successSub:   { fontSize: 14, color: "#64748b" },
-  successAmt:   { fontSize: 36, fontWeight: 800, color: "#1e293b", letterSpacing: -1, margin: "4px 0 8px" },
-  successNote:  { fontSize: 13, color: "#94a3b8", lineHeight: 1.6, marginTop: 4 },
-
-  // ETA card on success screen
-  etaCard: {
-    width: "100%",
-    background: "#f0f9ff",
-    border: "1.5px solid #bae6fd",
-    borderRadius: 16,
-    padding: "16px 18px",
-    textAlign: "left",
-    display: "flex", flexDirection: "column", gap: 8,
+  page: {
+    minHeight: "100dvh",
+    background: T.bg,
+    display: "flex",
+    flexDirection: "column",
+    fontFamily: "'DM Sans', sans-serif",
+    maxWidth: 480,
+    margin: "0 auto",
+    position: "relative",
   },
-  etaCardTop:   { display: "flex", alignItems: "center", gap: 8 },
-  etaCardIcon:  { fontSize: 18 },
-  etaCardTitle: { fontSize: 12, fontWeight: 700, color: "#0369a1", letterSpacing: 0.3, textTransform: "uppercase" },
-  etaCountdown: { fontSize: 42, fontWeight: 800, color: "#1e293b", letterSpacing: -2, lineHeight: 1, fontVariantNumeric: "tabular-nums" },
-  etaReadyAt:   { fontSize: 13, color: "#475569", fontWeight: 600 },
-  etaBarWrap:   { marginTop: 4 },
-  progressTrack:{ height: 6, background: "#e0f2fe", borderRadius: 99, overflow: "hidden" },
-  progressFill: { height: "100%", background: "linear-gradient(90deg, #38bdf8, #0ea5e9)", borderRadius: 99, transition: "width 1s linear" },
-  etaHint:      { fontSize: 11, color: "#94a3b8", textAlign: "center" },
 
-  etaDoneMsg:   { fontSize: 15, fontWeight: 600, color: "#15803d", lineHeight: 1.7, textAlign: "center" },
+  // ── Header ──────────────────────────────────────────────────────────────
+  hdr: {
+    background: T.primary,
+    padding: "14px 18px 12px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    position: "sticky",
+    top: 0,
+    zIndex: 50,
+  },
+  hdrLeft: {
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+  },
+  brandMark: {
+    width: 44,
+    height: 44,
+    background: T.gold,
+    borderRadius: 12,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+  },
+  brandMarkText: {
+    fontFamily: "'Lora', serif",
+    fontSize: 16,
+    fontWeight: 700,
+    color: T.primary,
+    letterSpacing: 0.5,
+  },
+  brandName: {
+    fontFamily: "'Lora', serif",
+    fontSize: 18,
+    fontWeight: 700,
+    color: "#FDF8F3",
+    letterSpacing: 0.2,
+    lineHeight: 1.2,
+  },
+  brandSub: {
+    fontSize: 10,
+    color: T.gold,
+    marginTop: 1,
+    letterSpacing: 1.5,
+    fontWeight: 600,
+  },
+  tablePill: {
+    background: "rgba(255,255,255,0.12)",
+    border: "1px solid rgba(255,255,255,0.2)",
+    borderRadius: 12,
+    padding: "6px 14px",
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+  },
+  tablePillLbl: {
+    fontSize: 10,
+    color: T.gold,
+    fontWeight: 700,
+    letterSpacing: 1,
+    textTransform: "uppercase",
+  },
+  tablePillNum: {
+    fontFamily: "'Lora', serif",
+    fontSize: 20,
+    fontWeight: 700,
+    color: "#FDF8F3",
+  },
 
-  // Waiting dots card
-  waitingCard:  { width: "100%", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 16, padding: "16px", display: "flex", flexDirection: "column", alignItems: "center", gap: 10 },
-  waitingDots:  { display: "flex", alignItems: "center" },
-  waitingTxt:   { fontSize: 13, color: "#94a3b8", textAlign: "center" },
+  // ── Hero banner ─────────────────────────────────────────────────────────
+  heroBanner: {
+    background: `linear-gradient(135deg, #7A4520 0%, #5C3317 60%, #3D1F0A 100%)`,
+    padding: "14px 20px",
+    borderBottom: `3px solid ${T.gold}`,
+  },
+  heroBannerInner: {},
+  heroText: {
+    fontFamily: "'Lora', serif",
+    fontSize: 14,
+    color: "#FDE8C8",
+    lineHeight: 1.6,
+    fontStyle: "normal",
+  },
 
-  backToMenuBtn: { marginTop: 8, background: "transparent", border: "1.5px solid #e2e8f0", color: "#64748b", borderRadius: 12, padding: "12px 28px", fontSize: 14, fontWeight: 700, cursor: "pointer", width: "100%" },
+  // ── Category Bar ────────────────────────────────────────────────────────
+  catBar: {
+    display: "flex",
+    gap: 8,
+    padding: "14px 18px",
+    overflowX: "auto",
+    background: T.surface,
+    borderBottom: `1px solid ${T.border}`,
+    position: "sticky",
+    top: 70,
+    zIndex: 40,
+  },
+  catChip: {
+    display: "flex",
+    alignItems: "center",
+    gap: 5,
+    padding: "8px 14px",
+    borderRadius: 50,
+    border: `1.5px solid ${T.border}`,
+    cursor: "pointer",
+    fontSize: 13,
+    fontWeight: 500,
+    whiteSpace: "nowrap",
+    background: T.surfaceWarm,
+    color: T.textMid,
+    transition: "all 0.2s ease",
+    flexShrink: 0,
+    fontFamily: "'DM Sans', sans-serif",
+  },
+  catChipActive: {
+    background: T.primary,
+    borderColor: T.primary,
+    color: "#FDE8C8",
+    fontWeight: 700,
+    boxShadow: `0 2px 8px rgba(92,51,23,0.28)`,
+  },
+  catEmoji: {
+    fontSize: 14,
+  },
+  catChipCount: {
+    fontSize: 11,
+    fontWeight: 700,
+    borderRadius: 20,
+    padding: "1px 7px",
+    background: T.border,
+    color: T.textMuted,
+  },
+  catChipCountActive: {
+    background: "rgba(255,255,255,0.18)",
+    color: "#FDE8C8",
+  },
+
+  // ── Section head ────────────────────────────────────────────────────────
+  sectionHead: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    padding: "18px 18px 10px",
+  },
+  sectionHeadTxt: {
+    fontFamily: "'Lora', serif",
+    fontSize: 22,
+    fontWeight: 700,
+    color: T.textDark,
+    letterSpacing: -0.3,
+  },
+  sectionHeadCount: {
+    fontSize: 13,
+    color: T.textMuted,
+    fontWeight: 500,
+  },
+
+  // ── Food Cards ──────────────────────────────────────────────────────────
+  foodList: {
+    padding: "0 16px",
+    display: "flex",
+    flexDirection: "column",
+    gap: 16,
+  },
+  foodCard: {
+    background: T.surface,
+    borderRadius: 20,
+    overflow: "hidden",
+    boxShadow: "0 2px 12px rgba(92,51,23,0.08)",
+    border: `1px solid ${T.border}`,
+  },
+  foodImgWrap: {
+    position: "relative",
+    height: 200,
+    overflow: "hidden",
+    background: "#EDE3D9",
+  },
+  foodImg: {
+    width: "100%",
+    height: "100%",
+    objectFit: "cover",
+    display: "block",
+    transition: "transform 0.4s ease",
+  },
+  foodImgOverlay: {
+    position: "absolute",
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: 80,
+    background: "linear-gradient(to top, rgba(44,26,14,0.55) 0%, transparent 100%)",
+  },
+  foodBadge: {
+    position: "absolute",
+    top: 12,
+    left: 12,
+    fontSize: 11,
+    fontWeight: 700,
+    padding: "4px 11px",
+    borderRadius: 20,
+    letterSpacing: 0.3,
+    fontFamily: "'DM Sans', sans-serif",
+  },
+  foodPriceTag: {
+    position: "absolute",
+    bottom: 12,
+    right: 12,
+    background: T.gold,
+    color: T.primary,
+    fontSize: 15,
+    fontWeight: 700,
+    padding: "5px 12px",
+    borderRadius: 10,
+    fontFamily: "'DM Sans', sans-serif",
+    letterSpacing: 0.2,
+  },
+  foodInfo: {
+    padding: "14px 16px 16px",
+  },
+  foodName: {
+    fontFamily: "'Lora', serif",
+    fontSize: 17,
+    fontWeight: 700,
+    color: T.textDark,
+    lineHeight: 1.3,
+    marginBottom: 6,
+  },
+  foodDesc: {
+    fontSize: 13,
+    color: T.textMuted,
+    lineHeight: 1.65,
+    marginBottom: 14,
+  },
+
+  // Temperature options
+  tempRow: {
+    display: "flex",
+    gap: 6,
+    marginBottom: 14,
+  },
+  tempBtn: {
+    flex: 1,
+    fontSize: 12,
+    fontWeight: 600,
+    padding: "8px 4px",
+    borderRadius: 10,
+    border: `1.5px solid ${T.border}`,
+    background: T.surfaceWarm,
+    color: T.textMid,
+    cursor: "pointer",
+    transition: "all 0.15s",
+    textAlign: "center",
+    fontFamily: "'DM Sans', sans-serif",
+  },
+  tempHotActive: {
+    background: "#FFF3EE",
+    borderColor: "#E07050",
+    color: "#B7410E",
+    fontWeight: 700,
+  },
+  tempColdActive: {
+    background: "#EFF6FF",
+    borderColor: "#93C5FD",
+    color: "#1D4ED8",
+    fontWeight: 700,
+  },
+
+  // Add to cart
+  foodAction: {
+    display: "flex",
+    justifyContent: "flex-end",
+  },
+  addBtn: {
+    background: T.primary,
+    color: "#FDE8C8",
+    border: "none",
+    borderRadius: 12,
+    padding: "12px 20px",
+    fontSize: 14,
+    fontWeight: 700,
+    cursor: "pointer",
+    letterSpacing: 0.2,
+    width: "100%",
+    fontFamily: "'DM Sans', sans-serif",
+    transition: "background 0.15s",
+  },
+  qtyRow: {
+    display: "flex",
+    alignItems: "center",
+    background: T.goldLight,
+    borderRadius: 12,
+    overflow: "hidden",
+    width: "100%",
+    border: `1.5px solid ${T.gold}`,
+  },
+  qbLg: {
+    background: "transparent",
+    border: "none",
+    flex: 1,
+    height: 46,
+    fontSize: 22,
+    fontWeight: 700,
+    cursor: "pointer",
+    color: T.primary,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  qnLg: {
+    fontFamily: "'Lora', serif",
+    fontSize: 18,
+    fontWeight: 700,
+    color: T.primary,
+    minWidth: 40,
+    textAlign: "center",
+  },
+
+  // ── Bottom Bar ──────────────────────────────────────────────────────────
+  bottomBar: {
+    position: "fixed",
+    bottom: 0,
+    left: "50%",
+    transform: "translateX(-50%)",
+    width: "100%",
+    maxWidth: 480,
+    background: T.surface,
+    borderTop: `2px solid ${T.border}`,
+    padding: "12px 18px 22px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+    zIndex: 60,
+    boxShadow: "0 -4px 24px rgba(92,51,23,0.10)",
+  },
+  bottomLeft: {},
+  bottomQty: {
+    fontSize: 11,
+    fontWeight: 600,
+    color: T.textMuted,
+    letterSpacing: 0.4,
+    textTransform: "uppercase",
+  },
+  bottomTotal: {
+    fontFamily: "'Lora', serif",
+    fontSize: 26,
+    fontWeight: 700,
+    color: T.textDark,
+    letterSpacing: -0.5,
+  },
+  viewCartBtn: {
+    background: T.accent,
+    color: "#FFF5F0",
+    border: "none",
+    borderRadius: 14,
+    padding: "14px 22px",
+    fontSize: 15,
+    fontWeight: 700,
+    cursor: "pointer",
+    letterSpacing: 0.1,
+    whiteSpace: "nowrap",
+    transition: "all 0.15s",
+    fontFamily: "'DM Sans', sans-serif",
+    boxShadow: "0 4px 14px rgba(192,57,43,0.30)",
+  },
+  viewCartBtnOff: {
+    background: T.border,
+    color: T.textLight,
+    cursor: "not-allowed",
+    boxShadow: "none",
+  },
+
+  // ── Cart Screen ─────────────────────────────────────────────────────────
+  cartHdr: {
+    background: T.surface,
+    padding: "16px 18px 14px",
+    borderBottom: `1px solid ${T.border}`,
+    position: "sticky",
+    top: 0,
+    zIndex: 50,
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+  },
+  backBtn: {
+    background: T.surfaceWarm,
+    border: `1px solid ${T.border}`,
+    borderRadius: 10,
+    cursor: "pointer",
+    color: T.primary,
+    padding: "8px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    flexShrink: 0,
+  },
+  cartHdrTitle: {
+    fontFamily: "'Lora', serif",
+    fontSize: 20,
+    fontWeight: 700,
+    color: T.textDark,
+    letterSpacing: -0.3,
+    flex: 1,
+  },
+  cartHdrSub: {
+    fontSize: 13,
+    color: T.textMuted,
+    marginTop: 2,
+  },
+  cartHdrBadge: {
+    background: T.accent,
+    color: "#FFF5F0",
+    borderRadius: "50%",
+    width: 30,
+    height: 30,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontSize: 14,
+    fontWeight: 700,
+    flexShrink: 0,
+  },
+  cartBody: {
+    flex: 1,
+    overflowY: "auto",
+    paddingBottom: 120,
+  },
+  cartSection: {
+    padding: "16px 18px 0",
+  },
+  sectionLabel: {
+    fontSize: 10,
+    fontWeight: 700,
+    color: T.textMuted,
+    letterSpacing: 1.5,
+    textTransform: "uppercase",
+    marginBottom: 12,
+  },
+  cartRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+    background: T.surface,
+    borderRadius: 16,
+    padding: "12px",
+    marginBottom: 10,
+    border: `1px solid ${T.border}`,
+  },
+  cartThumb: {
+    width: 64,
+    height: 64,
+    borderRadius: 12,
+    objectFit: "cover",
+    flexShrink: 0,
+    background: T.border,
+  },
+  cartRowInfo: { flex: 1 },
+  cartRowName: {
+    fontFamily: "'Lora', serif",
+    fontSize: 14,
+    fontWeight: 700,
+    color: T.textDark,
+    marginBottom: 3,
+    lineHeight: 1.3,
+  },
+  cartRowTemp: {
+    fontSize: 12,
+    color: "#1D4ED8",
+    fontWeight: 600,
+    marginBottom: 4,
+  },
+  cartRowPrice: {
+    fontSize: 15,
+    fontWeight: 700,
+    color: T.gold,
+  },
+  qRow: {
+    display: "flex",
+    alignItems: "center",
+    background: T.surfaceWarm,
+    borderRadius: 10,
+    border: `1px solid ${T.border}`,
+    overflow: "hidden",
+  },
+  qbCart: {
+    background: "transparent",
+    border: "none",
+    width: 34,
+    height: 34,
+    fontSize: 18,
+    fontWeight: 800,
+    cursor: "pointer",
+    color: T.primary,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  qnCart: {
+    fontSize: 15,
+    fontWeight: 700,
+    color: T.textDark,
+    minWidth: 28,
+    textAlign: "center",
+    fontFamily: "'Lora', serif",
+  },
+  noteInput: {
+    width: "100%",
+    background: T.surfaceWarm,
+    border: `1.5px solid ${T.border}`,
+    borderRadius: 14,
+    padding: "12px 14px",
+    fontSize: 14,
+    resize: "none",
+    outline: "none",
+    fontFamily: "'DM Sans', sans-serif",
+    color: T.textDark,
+    lineHeight: 1.6,
+    marginTop: 4,
+  },
+  summaryCard: {
+    background: T.surfaceWarm,
+    borderRadius: 16,
+    padding: "16px",
+    border: `1px solid ${T.border}`,
+    marginTop: 4,
+  },
+  summaryLine: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 10,
+  },
+  summaryKey: {
+    fontSize: 14,
+    color: T.textMuted,
+  },
+  summaryVal: {
+    fontSize: 14,
+    fontWeight: 600,
+    color: T.textDark,
+  },
+  summaryKeyBold: {
+    fontSize: 15,
+    fontWeight: 700,
+    color: T.textDark,
+  },
+  summaryBig: {
+    fontFamily: "'Lora', serif",
+    fontSize: 24,
+    fontWeight: 700,
+    color: T.primary,
+    letterSpacing: -0.5,
+  },
+  divider: {
+    height: 1,
+    background: T.border,
+    margin: "10px 0",
+  },
+  cartFooter: {
+    position: "fixed",
+    bottom: 0,
+    left: "50%",
+    transform: "translateX(-50%)",
+    width: "100%",
+    maxWidth: 480,
+    background: T.surface,
+    padding: "12px 18px 26px",
+    borderTop: `1px solid ${T.border}`,
+    zIndex: 60,
+  },
+  confirmBtn: {
+    width: "100%",
+    background: T.primary,
+    color: "#FDE8C8",
+    border: "none",
+    borderRadius: 16,
+    padding: "16px 20px",
+    fontSize: 16,
+    fontWeight: 700,
+    cursor: "pointer",
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    letterSpacing: 0.1,
+    fontFamily: "'DM Sans', sans-serif",
+  },
+  confirmAmt: {
+    fontFamily: "'Lora', serif",
+    fontSize: 17,
+    fontWeight: 700,
+    color: T.gold,
+  },
+
+  // Empty state
+  emptyState: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    padding: "70px 20px",
+    gap: 12,
+  },
+  emptyIco: {
+    fontSize: 52,
+    marginBottom: 8,
+  },
+  emptyTxt: {
+    fontFamily: "'Lora', serif",
+    fontSize: 20,
+    fontWeight: 700,
+    color: T.textDark,
+  },
+  emptyHint: {
+    fontSize: 14,
+    color: T.textMuted,
+  },
+  goMenuBtn: {
+    marginTop: 10,
+    background: T.primary,
+    color: "#FDE8C8",
+    border: "none",
+    borderRadius: 12,
+    padding: "13px 30px",
+    fontSize: 15,
+    fontWeight: 700,
+    cursor: "pointer",
+    fontFamily: "'DM Sans', sans-serif",
+  },
+
+  // ── Success Screen ──────────────────────────────────────────────────────
+  successPage: {
+    minHeight: "100dvh",
+    background: T.bg,
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontFamily: "'DM Sans', sans-serif",
+    padding: 24,
+  },
+  successBox: {
+    background: T.surface,
+    borderRadius: 28,
+    overflow: "hidden",
+    width: "100%",
+    maxWidth: 380,
+    boxShadow: "0 8px 40px rgba(92,51,23,0.14)",
+    animation: "fadeUp 0.4s ease",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: 10,
+    paddingBottom: 28,
+  },
+  successTopAccent: {
+    width: "100%",
+    height: 6,
+    background: `linear-gradient(90deg, ${T.gold}, ${T.accent}, ${T.primary})`,
+    marginBottom: 20,
+  },
+  checkCircle: {
+    width: 76,
+    height: 76,
+    borderRadius: "50%",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    animation: "popIn 0.5s ease",
+    marginBottom: 4,
+  },
+  successTitle: {
+    fontFamily: "'Lora', serif",
+    fontSize: 26,
+    fontWeight: 700,
+    color: T.textDark,
+    letterSpacing: -0.4,
+    textAlign: "center",
+    padding: "0 24px",
+  },
+  successTableTag: {
+    background: T.goldLight,
+    border: `1px solid ${T.gold}`,
+    borderRadius: 20,
+    padding: "4px 16px",
+    fontSize: 12,
+    fontWeight: 700,
+    color: T.gold,
+    letterSpacing: 1,
+    textTransform: "uppercase",
+  },
+  successAmt: {
+    fontFamily: "'Lora', serif",
+    fontSize: 38,
+    fontWeight: 700,
+    color: T.primary,
+    letterSpacing: -1,
+    margin: "4px 0 8px",
+  },
+  successNote: {
+    fontSize: 13,
+    color: T.textMuted,
+    lineHeight: 1.7,
+    textAlign: "center",
+    padding: "0 28px",
+  },
+
+  // ETA Card
+  etaCard: {
+    width: "calc(100% - 48px)",
+    background: "#EFF8FF",
+    border: "1.5px solid #93C5FD",
+    borderRadius: 18,
+    padding: "16px 18px",
+    display: "flex",
+    flexDirection: "column",
+    gap: 8,
+    margin: "0 0 4px",
+  },
+  etaCardLabel: {
+    fontSize: 11,
+    fontWeight: 700,
+    color: "#1D4ED8",
+    letterSpacing: 1,
+    textTransform: "uppercase",
+  },
+  etaCountdown: {
+    fontFamily: "'Lora', serif",
+    fontSize: 44,
+    fontWeight: 700,
+    color: T.textDark,
+    letterSpacing: -2,
+    lineHeight: 1,
+    fontVariantNumeric: "tabular-nums",
+  },
+  etaReadyAt: {
+    fontSize: 13,
+    color: T.textMid,
+    fontWeight: 600,
+  },
+  progressTrack: {
+    height: 6,
+    background: "#DBEAFE",
+    borderRadius: 99,
+    overflow: "hidden",
+  },
+  progressFill: {
+    height: "100%",
+    background: "linear-gradient(90deg, #60A5FA, #2563EB)",
+    borderRadius: 99,
+    transition: "width 1s linear",
+  },
+  etaHint: {
+    fontSize: 11,
+    color: T.textLight,
+    textAlign: "center",
+  },
+
+  // Waiting dots
+  waitingCard: {
+    width: "calc(100% - 48px)",
+    background: T.surfaceWarm,
+    border: `1px solid ${T.border}`,
+    borderRadius: 18,
+    padding: "16px",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    gap: 10,
+  },
+  waitingDots: { display: "flex", alignItems: "center" },
+  waitingTxt: {
+    fontSize: 13,
+    color: T.textMuted,
+    textAlign: "center",
+  },
+
+  backToMenuBtn: {
+    marginTop: 8,
+    background: "transparent",
+    border: `1.5px solid ${T.border}`,
+    color: T.textMid,
+    borderRadius: 14,
+    padding: "13px 28px",
+    fontSize: 14,
+    fontWeight: 600,
+    cursor: "pointer",
+    width: "calc(100% - 48px)",
+    fontFamily: "'DM Sans', sans-serif",
+  },
 };
 
 export default Customer;
