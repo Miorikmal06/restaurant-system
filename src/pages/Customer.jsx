@@ -1,6 +1,6 @@
-import { addDoc, collection } from "firebase/firestore";
+import { addDoc, collection, doc, onSnapshot } from "firebase/firestore";
 import { db } from "../firebase";
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { useParams } from "react-router-dom";
 
 // ─── DATA ────────────────────────────────────────────────────────────────────
@@ -64,18 +64,52 @@ const TEMP_OPTS = [
   { val: "iced", label: "Ais 🥤" },
 ];
 
+// ─── ETA COUNTDOWN HOOK ──────────────────────────────────────────────────────
+function useCountdown(readyAt) {
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (!readyAt) return;
+    const t = setInterval(() => setTick(p => p + 1), 1000);
+    return () => clearInterval(t);
+  }, [readyAt]);
+
+  if (!readyAt) return null;
+  const target = readyAt.toDate ? readyAt.toDate() : new Date(readyAt);
+  const diff   = Math.floor((target.getTime() - Date.now()) / 1000);
+  if (diff <= 0) return { done: true, label: "Dah siap!", mins: 0, secs: 0, pct: 100 };
+  const m = Math.floor(diff / 60);
+  const s = diff % 60;
+  return { done: false, label: `${m}:${String(s).padStart(2, "0")}`, mins: m, secs: s, pct: null };
+}
+
 // ─── COMPONENT ───────────────────────────────────────────────────────────────
 function Customer() {
   const { tableId } = useParams();
 
-  const [cart, setCart]           = useState({});
-  const [activeCat, setActiveCat] = useState("Semua");
-  const [screen, setScreen]       = useState("menu"); // menu | cart | success
-  const [note, setNote]           = useState("");
+  const [cart, setCart]             = useState({});
+  const [activeCat, setActiveCat]   = useState("Semua");
+  const [screen, setScreen]         = useState("menu"); // menu | cart | success
+  const [note, setNote]             = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [tempPref, setTempPref]   = useState({});
+  const [tempPref, setTempPref]     = useState({});
   const [expandedId, setExpandedId] = useState(null);
-  const catBarRef = useRef(null);
+  const catBarRef                   = useRef(null);
+
+  // Track the last submitted order doc for real-time ETA
+  const [orderId, setOrderId]       = useState(null);
+  const [orderDoc, setOrderDoc]     = useState(null);
+  const [lastTotal, setLastTotal]   = useState(0);
+
+  // Live listener for the submitted order (ETA updates from admin)
+  useEffect(() => {
+    if (!orderId) return;
+    const unsub = onSnapshot(doc(db, "orders", orderId), snap => {
+      if (snap.exists()) setOrderDoc({ id: snap.id, ...snap.data() });
+    });
+    return unsub;
+  }, [orderId]);
+
+  const countdown = useCountdown(orderDoc?.readyAt ?? null);
 
   const filtered   = activeCat === "Semua" ? foods : foods.filter(f => f.cat === activeCat);
   const total      = foods.reduce((s, f) => s + f.price * (cart[f.id] || 0), 0);
@@ -94,7 +128,6 @@ function Customer() {
 
   const selectCat = (cat) => {
     setActiveCat(cat);
-    // scroll cat chip into view
     setTimeout(() => {
       const el = catBarRef.current?.querySelector(`[data-cat="${cat}"]`);
       el?.scrollIntoView({ inline: "center", behavior: "smooth" });
@@ -109,29 +142,98 @@ function Customer() {
       ...(f.tempOpts ? { temp: getTemp(f.id) } : {}),
     }));
     try {
-      await addDoc(collection(db, "orders"), {
+      const ref = await addDoc(collection(db, "orders"), {
         table: tableId, items, total, note, status: "pending", createdAt: new Date(),
       });
+      setLastTotal(total);
+      setOrderId(ref.id);     // start listening to this order
+      setOrderDoc(null);      // reset (listener will populate)
       setCart({}); setNote("");
       setScreen("success");
-      setTimeout(() => setScreen("menu"), 4000);
     } catch (e) { console.error(e); }
     setSubmitting(false);
   };
 
   // ── SUCCESS SCREEN ──────────────────────────────────────────────────────────
   if (screen === "success") {
+    const etaMins = orderDoc?.etaMins ?? null;
+    const readyAt = orderDoc?.readyAt ?? null;
+
+    // Format ready time
+    const fmtReadyTime = (ts) => {
+      if (!ts) return null;
+      const d = ts.toDate ? ts.toDate() : new Date(ts);
+      return d.toLocaleTimeString("ms-MY", { hour: "2-digit", minute: "2-digit" });
+    };
+
     return (
       <div style={ss.successPage}>
         <style>{globalCss}</style>
         <div style={ss.successBox}>
-          <div style={ss.checkCircle}>
-            <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round"><polyline points="20 6 9 17 4 12"/></svg>
+
+          {/* Check / clock icon */}
+          {countdown?.done ? (
+            <div style={{ ...ss.checkCircle, background: "#16a34a" }}>
+              <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="2.5" strokeLinecap="round">
+                <polyline points="20 6 9 17 4 12"/>
+              </svg>
+            </div>
+          ) : (
+            <div style={{ ...ss.checkCircle, background: "#1e293b" }}>
+              <svg width="44" height="44" viewBox="0 0 24 24" fill="none" stroke="#fff" strokeWidth="1.8" strokeLinecap="round">
+                <circle cx="12" cy="12" r="10"/>
+                <polyline points="12 6 12 12 16 14"/>
+              </svg>
+            </div>
+          )}
+
+          <div style={ss.successTitle}>
+            {countdown?.done ? "Pesanan Dah Siap! 🎉" : "Pesanan Dihantar!"}
           </div>
-          <div style={ss.successTitle}>Pesanan Dihantar!</div>
           <div style={ss.successSub}>Meja {tableId} · Sila tunggu sebentar</div>
-          <div style={ss.successAmt}>RM {total.toFixed(2)}</div>
+          <div style={ss.successAmt}>RM {lastTotal.toFixed(2)}</div>
+
+          {/* ETA Block — shows when admin sets it */}
+          {readyAt && countdown && !countdown.done && (
+            <div style={ss.etaCard}>
+              <div style={ss.etaCardTop}>
+                <span style={ss.etaCardIcon}>⏱</span>
+                <span style={ss.etaCardTitle}>Masa Anggaran Siap</span>
+              </div>
+              {/* Big countdown */}
+              <div style={ss.etaCountdown}>{countdown.label}</div>
+              <div style={ss.etaReadyAt}>Dijangka siap pada {fmtReadyTime(readyAt)}</div>
+              <div style={ss.etaBarWrap}>
+                <EtaProgressBar readyAt={readyAt} etaMins={etaMins} />
+              </div>
+              <div style={ss.etaHint}>Halaman ini dikemaskini secara automatik</div>
+            </div>
+          )}
+
+          {/* Done state */}
+          {countdown?.done && (
+            <div style={{ ...ss.etaCard, background: "#f0fdf4", border: "1.5px solid #86efac" }}>
+              <div style={ss.etaDoneMsg}>
+                🍽️ Pesanan anda sedang dibawa ke meja.<br />Selamat menjamu selera!
+              </div>
+            </div>
+          )}
+
+          {/* Waiting — no ETA yet */}
+          {!readyAt && (
+            <div style={ss.waitingCard}>
+              <div style={ss.waitingDots}>
+                <span className="dot" /><span className="dot" /><span className="dot" />
+              </div>
+              <div style={ss.waitingTxt}>Menunggu pengesahan masa dari dapur...</div>
+            </div>
+          )}
+
           <div style={ss.successNote}>Staf kami sedang menyediakan pesanan anda</div>
+
+          <button onClick={() => setScreen("menu")} style={ss.backToMenuBtn}>
+            Kembali ke Menu
+          </button>
         </div>
       </div>
     );
@@ -143,7 +245,6 @@ function Customer() {
       <div style={ss.page}>
         <style>{globalCss}</style>
 
-        {/* Cart Header */}
         <div style={ss.cartHdr}>
           <button onClick={() => setScreen("menu")} style={ss.backBtn}>
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><polyline points="15 18 9 12 15 6"/></svg>
@@ -164,7 +265,6 @@ function Customer() {
             </div>
           ) : (
             <>
-              {/* Items */}
               <div style={ss.cartSection}>
                 <div style={ss.sectionLabel}>Item Dipilih</div>
                 {cartItems.map(f => {
@@ -191,7 +291,6 @@ function Customer() {
                 })}
               </div>
 
-              {/* Note */}
               <div style={ss.cartSection}>
                 <div style={ss.sectionLabel}>Nota Khas (Pilihan)</div>
                 <textarea
@@ -203,7 +302,6 @@ function Customer() {
                 />
               </div>
 
-              {/* Summary */}
               <div style={ss.cartSection}>
                 <div style={ss.sectionLabel}>Ringkasan</div>
                 <div style={ss.summaryCard}>
@@ -226,7 +324,6 @@ function Customer() {
           )}
         </div>
 
-        {/* Confirm Button */}
         {cartItems.length > 0 && (
           <div style={ss.cartFooter}>
             <button onClick={submitOrder} disabled={submitting} style={ss.confirmBtn}>
@@ -246,7 +343,6 @@ function Customer() {
     <div style={ss.page}>
       <style>{globalCss}</style>
 
-      {/* Header */}
       <div style={ss.hdr}>
         <div style={ss.hdrLeft}>
           <div style={ss.brandMark}>WS</div>
@@ -261,7 +357,6 @@ function Customer() {
         </div>
       </div>
 
-      {/* Category Pills - horizontal scroll */}
       <div style={ss.catBar} ref={catBarRef}>
         {CATS.map(cat => {
           const active = activeCat === cat;
@@ -289,13 +384,11 @@ function Customer() {
         })}
       </div>
 
-      {/* Section title */}
       <div style={ss.sectionHead}>
         <span style={ss.sectionHeadTxt}>{activeCat === "Semua" ? "Semua Menu" : activeCat}</span>
         <span style={ss.sectionHeadCount}>{filtered.length} hidangan</span>
       </div>
 
-      {/* Food List — single column, large cards for easy tapping */}
       <div style={ss.foodList}>
         {filtered.map(food => {
           const q        = cart[food.id] || 0;
@@ -305,7 +398,6 @@ function Customer() {
 
           return (
             <div key={food.id} style={ss.foodCard} className="food-card">
-              {/* Image */}
               <div style={ss.foodImgWrap} onClick={() => setExpandedId(expanded ? null : food.id)}>
                 <img src={food.img} alt={food.name} style={ss.foodImg} loading="lazy"
                   onError={e => e.target.style.display = "none"} />
@@ -319,7 +411,6 @@ function Customer() {
                 )}
               </div>
 
-              {/* Info */}
               <div style={ss.foodInfo}>
                 <div style={ss.foodInfoTop}>
                   <div style={ss.foodName}>{food.name}</div>
@@ -327,7 +418,6 @@ function Customer() {
                 </div>
                 <div style={ss.foodDesc}>{food.desc}</div>
 
-                {/* Temp toggle — only for drinks */}
                 {food.tempOpts && (
                   <div style={ss.tempRow}>
                     {TEMP_OPTS.map(o => (
@@ -337,9 +427,7 @@ function Customer() {
                         style={{
                           ...ss.tempBtn,
                           ...(temp === o.val
-                            ? o.val === "hot"
-                              ? ss.tempHot
-                              : ss.tempCold
+                            ? o.val === "hot" ? ss.tempHot : ss.tempCold
                             : {}),
                         }}
                       >
@@ -349,7 +437,6 @@ function Customer() {
                   </div>
                 )}
 
-                {/* Add to cart */}
                 <div style={ss.foodAction}>
                   {q === 0 ? (
                     <button onClick={() => add(food.id)} style={ss.addBtn} className="tap-btn">
@@ -367,12 +454,9 @@ function Customer() {
             </div>
           );
         })}
-
-        {/* Bottom padding for tab bar */}
         <div style={{ height: 100 }} />
       </div>
 
-      {/* Sticky bottom bar — cart button */}
       <div style={ss.bottomBar}>
         <div style={ss.bottomLeft}>
           <div style={ss.bottomQty}>{totalQty === 0 ? "Tiada item" : `${totalQty} item dipilih`}</div>
@@ -381,15 +465,37 @@ function Customer() {
         <button
           onClick={() => setScreen("cart")}
           disabled={totalQty === 0}
-          style={{
-            ...ss.viewCartBtn,
-            ...(totalQty === 0 ? ss.viewCartBtnOff : {}),
-          }}
+          style={{ ...ss.viewCartBtn, ...(totalQty === 0 ? ss.viewCartBtnOff : {}) }}
           className="tap-btn"
         >
           Lihat Pesanan →
         </button>
       </div>
+    </div>
+  );
+}
+
+// ─── ETA PROGRESS BAR ────────────────────────────────────────────────────────
+// Animated progress bar from 0→100% as time counts down
+function EtaProgressBar({ readyAt, etaMins }) {
+  const [pct, setPct] = useState(0);
+
+  useEffect(() => {
+    const update = () => {
+      const target  = (readyAt?.toDate ? readyAt.toDate() : new Date(readyAt)).getTime();
+      const total   = (etaMins || 1) * 60 * 1000;
+      const start   = target - total;
+      const elapsed = Date.now() - start;
+      setPct(Math.min(100, Math.max(0, (elapsed / total) * 100)));
+    };
+    update();
+    const t = setInterval(update, 1000);
+    return () => clearInterval(t);
+  }, [readyAt, etaMins]);
+
+  return (
+    <div style={ss.progressTrack}>
+      <div style={{ ...ss.progressFill, width: `${pct}%` }} />
     </div>
   );
 }
@@ -415,34 +521,43 @@ const globalCss = `
     80%  { transform: scale(1.05); }
     100% { transform: scale(1); opacity: 1; }
   }
+  @keyframes blink {
+    0%, 100% { opacity: 0.2; transform: scale(0.8); }
+    50%       { opacity: 1;   transform: scale(1.2); }
+  }
+  .dot {
+    display: inline-block;
+    width: 8px; height: 8px;
+    background: #94a3b8;
+    border-radius: 50%;
+    margin: 0 3px;
+    animation: blink 1.4s ease-in-out infinite;
+  }
+  .dot:nth-child(2) { animation-delay: 0.2s; }
+  .dot:nth-child(3) { animation-delay: 0.4s; }
 `;
 
 // ─── STYLES ──────────────────────────────────────────────────────────────────
 const ss = {
-  // Page shell
-  page:        { minHeight: "100dvh", background: "#f8fafc", display: "flex", flexDirection: "column", fontFamily: "'Plus Jakarta Sans', sans-serif", maxWidth: 480, margin: "0 auto", position: "relative" },
+  page:         { minHeight: "100dvh", background: "#f8fafc", display: "flex", flexDirection: "column", fontFamily: "'Plus Jakarta Sans', sans-serif", maxWidth: 480, margin: "0 auto", position: "relative" },
 
-  // Header
-  hdr:         { background: "#fff", padding: "14px 18px 12px", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "1px solid #f1f5f9", position: "sticky", top: 0, zIndex: 50 },
-  hdrLeft:     { display: "flex", alignItems: "center", gap: 10 },
-  brandMark:   { width: 40, height: 40, background: "#1e293b", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, fontWeight: 800, color: "#fff", letterSpacing: -0.5, flexShrink: 0 },
-  brandName:   { fontSize: 16, fontWeight: 800, color: "#1e293b", letterSpacing: -0.3, lineHeight: 1.2 },
-  brandSub:    { fontSize: 11, color: "#94a3b8", marginTop: 1 },
-  tablePill:   { background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 10, padding: "6px 14px", display: "flex", alignItems: "center", gap: 6 },
-  tablePillLbl:{ fontSize: 11, color: "#94a3b8", fontWeight: 600, letterSpacing: 0.5 },
-  tablePillNum:{ fontSize: 16, fontWeight: 800, color: "#1e293b" },
+  hdr:          { background: "#fff", padding: "14px 18px 12px", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: "1px solid #f1f5f9", position: "sticky", top: 0, zIndex: 50 },
+  hdrLeft:      { display: "flex", alignItems: "center", gap: 10 },
+  brandMark:    { width: 40, height: 40, background: "#1e293b", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, fontWeight: 800, color: "#fff", letterSpacing: -0.5, flexShrink: 0 },
+  brandName:    { fontSize: 16, fontWeight: 800, color: "#1e293b", letterSpacing: -0.3, lineHeight: 1.2 },
+  brandSub:     { fontSize: 11, color: "#94a3b8", marginTop: 1 },
+  tablePill:    { background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 10, padding: "6px 14px", display: "flex", alignItems: "center", gap: 6 },
+  tablePillLbl: { fontSize: 11, color: "#94a3b8", fontWeight: 600, letterSpacing: 0.5 },
+  tablePillNum: { fontSize: 16, fontWeight: 800, color: "#1e293b" },
 
-  // Category bar
-  catBar:      { display: "flex", gap: 8, padding: "14px 18px", overflowX: "auto", background: "#fff", borderBottom: "1px solid #f1f5f9", position: "sticky", top: 66, zIndex: 40 },
-  catChip:     { display: "flex", alignItems: "center", gap: 6, padding: "9px 14px", borderRadius: 50, border: "none", cursor: "pointer", fontSize: 14, fontWeight: 500, whiteSpace: "nowrap", transition: "all 0.2s ease", flexShrink: 0 },
-  catChipCount:{ fontSize: 11, fontWeight: 700, borderRadius: 20, padding: "1px 7px", transition: "all 0.2s" },
+  catBar:       { display: "flex", gap: 8, padding: "14px 18px", overflowX: "auto", background: "#fff", borderBottom: "1px solid #f1f5f9", position: "sticky", top: 66, zIndex: 40 },
+  catChip:      { display: "flex", alignItems: "center", gap: 6, padding: "9px 14px", borderRadius: 50, border: "none", cursor: "pointer", fontSize: 14, fontWeight: 500, whiteSpace: "nowrap", transition: "all 0.2s ease", flexShrink: 0 },
+  catChipCount: { fontSize: 11, fontWeight: 700, borderRadius: 20, padding: "1px 7px", transition: "all 0.2s" },
 
-  // Section head
-  sectionHead:  { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 18px 8px" },
-  sectionHeadTxt:{ fontSize: 20, fontWeight: 800, color: "#1e293b", letterSpacing: -0.4 },
-  sectionHeadCount:{ fontSize: 13, color: "#94a3b8", fontWeight: 500 },
+  sectionHead:      { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "16px 18px 8px" },
+  sectionHeadTxt:   { fontSize: 20, fontWeight: 800, color: "#1e293b", letterSpacing: -0.4 },
+  sectionHeadCount: { fontSize: 13, color: "#94a3b8", fontWeight: 500 },
 
-  // Food list
   foodList:    { padding: "0 18px", display: "flex", flexDirection: "column", gap: 14 },
   foodCard:    { background: "#fff", borderRadius: 18, overflow: "hidden", boxShadow: "0 1px 4px rgba(0,0,0,0.06)", border: "1px solid #f1f5f9" },
   foodImgWrap: { position: "relative", height: 190, overflow: "hidden", background: "#f0ece8" },
@@ -456,37 +571,32 @@ const ss = {
   foodPrice:   { fontSize: 17, fontWeight: 800, color: "#1e293b", flexShrink: 0 },
   foodDesc:    { fontSize: 13, color: "#64748b", lineHeight: 1.6, marginBottom: 12 },
 
-  // Temp toggle
-  tempRow:     { display: "flex", gap: 6, marginBottom: 14 },
-  tempBtn:     { flex: 1, fontSize: 12, fontWeight: 600, padding: "8px 4px", borderRadius: 10, border: "1.5px solid #e2e8f0", background: "#f8fafc", color: "#64748b", cursor: "pointer", transition: "all 0.15s", textAlign: "center" },
-  tempHot:     { background: "#fff7ed", borderColor: "#fb923c", color: "#c2410c", fontWeight: 700 },
-  tempCold:    { background: "#eff6ff", borderColor: "#60a5fa", color: "#1d4ed8", fontWeight: 700 },
+  tempRow:  { display: "flex", gap: 6, marginBottom: 14 },
+  tempBtn:  { flex: 1, fontSize: 12, fontWeight: 600, padding: "8px 4px", borderRadius: 10, border: "1.5px solid #e2e8f0", background: "#f8fafc", color: "#64748b", cursor: "pointer", transition: "all 0.15s", textAlign: "center" },
+  tempHot:  { background: "#fff7ed", borderColor: "#fb923c", color: "#c2410c", fontWeight: 700 },
+  tempCold: { background: "#eff6ff", borderColor: "#60a5fa", color: "#1d4ed8", fontWeight: 700 },
 
-  // Add / qty
-  foodAction:  { display: "flex", justifyContent: "flex-end" },
-  addBtn:      { background: "#1e293b", color: "#fff", border: "none", borderRadius: 12, padding: "11px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer", letterSpacing: 0.1, transition: "all 0.15s", width: "100%" },
-  qtyRow:      { display: "flex", alignItems: "center", gap: 0, background: "#f1f5f9", borderRadius: 12, overflow: "hidden", width: "100%" },
-  qbLg:        { background: "transparent", border: "none", flex: 1, height: 46, fontSize: 22, fontWeight: 700, cursor: "pointer", color: "#1e293b", display: "flex", alignItems: "center", justifyContent: "center" },
-  qnLg:        { fontSize: 18, fontWeight: 800, color: "#1e293b", minWidth: 40, textAlign: "center" },
+  foodAction: { display: "flex", justifyContent: "flex-end" },
+  addBtn:     { background: "#1e293b", color: "#fff", border: "none", borderRadius: 12, padding: "11px 20px", fontSize: 14, fontWeight: 700, cursor: "pointer", letterSpacing: 0.1, transition: "all 0.15s", width: "100%" },
+  qtyRow:     { display: "flex", alignItems: "center", gap: 0, background: "#f1f5f9", borderRadius: 12, overflow: "hidden", width: "100%" },
+  qbLg:       { background: "transparent", border: "none", flex: 1, height: 46, fontSize: 22, fontWeight: 700, cursor: "pointer", color: "#1e293b", display: "flex", alignItems: "center", justifyContent: "center" },
+  qnLg:       { fontSize: 18, fontWeight: 800, color: "#1e293b", minWidth: 40, textAlign: "center" },
 
-  // Bottom bar
-  bottomBar:   { position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, background: "#fff", borderTop: "1px solid #f1f5f9", padding: "12px 18px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, zIndex: 60, boxShadow: "0 -4px 20px rgba(0,0,0,0.06)" },
-  bottomLeft:  {},
-  bottomQty:   { fontSize: 11, fontWeight: 600, color: "#94a3b8", letterSpacing: 0.3 },
-  bottomTotal: { fontSize: 22, fontWeight: 800, color: "#1e293b", letterSpacing: -0.5 },
-  viewCartBtn: { background: "#1e293b", color: "#fff", border: "none", borderRadius: 14, padding: "13px 22px", fontSize: 15, fontWeight: 700, cursor: "pointer", letterSpacing: 0.1, whiteSpace: "nowrap", transition: "all 0.15s" },
+  bottomBar:    { position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, background: "#fff", borderTop: "1px solid #f1f5f9", padding: "12px 18px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, zIndex: 60, boxShadow: "0 -4px 20px rgba(0,0,0,0.06)" },
+  bottomLeft:   {},
+  bottomQty:    { fontSize: 11, fontWeight: 600, color: "#94a3b8", letterSpacing: 0.3 },
+  bottomTotal:  { fontSize: 22, fontWeight: 800, color: "#1e293b", letterSpacing: -0.5 },
+  viewCartBtn:  { background: "#1e293b", color: "#fff", border: "none", borderRadius: 14, padding: "13px 22px", fontSize: 15, fontWeight: 700, cursor: "pointer", letterSpacing: 0.1, whiteSpace: "nowrap", transition: "all 0.15s" },
   viewCartBtnOff:{ background: "#e2e8f0", color: "#94a3b8", cursor: "not-allowed" },
 
-  // ── CART SCREEN ──
+  // Cart
   cartHdr:     { background: "#fff", padding: "16px 18px 14px", borderBottom: "1px solid #f1f5f9", position: "sticky", top: 0, zIndex: 50 },
   backBtn:     { background: "none", border: "none", cursor: "pointer", color: "#1e293b", padding: "0 0 2px", marginBottom: 4, display: "flex", alignItems: "center" },
   cartHdrTitle:{ fontSize: 22, fontWeight: 800, color: "#1e293b", letterSpacing: -0.4 },
   cartHdrSub:  { fontSize: 13, color: "#94a3b8", marginTop: 2 },
-
   cartBody:    { flex: 1, overflowY: "auto", paddingBottom: 120 },
   cartSection: { padding: "16px 18px 0" },
   sectionLabel:{ fontSize: 11, fontWeight: 700, color: "#94a3b8", letterSpacing: 1, textTransform: "uppercase", marginBottom: 10 },
-
   cartRow:     { display: "flex", alignItems: "center", gap: 12, background: "#fff", borderRadius: 14, padding: "12px", marginBottom: 10, border: "1px solid #f1f5f9", boxShadow: "0 1px 3px rgba(0,0,0,0.04)" },
   cartThumb:   { width: 60, height: 60, borderRadius: 10, objectFit: "cover", flexShrink: 0, background: "#f0ece8" },
   cartRowInfo: { flex: 1 },
@@ -496,9 +606,7 @@ const ss = {
   qRow:        { display: "flex", alignItems: "center", gap: 0, background: "#f8fafc", borderRadius: 10, border: "1px solid #e2e8f0", overflow: "hidden" },
   qbCart:      { background: "transparent", border: "none", width: 34, height: 34, fontSize: 18, fontWeight: 800, cursor: "pointer", color: "#1e293b", display: "flex", alignItems: "center", justifyContent: "center" },
   qnCart:      { fontSize: 15, fontWeight: 800, color: "#1e293b", minWidth: 28, textAlign: "center" },
-
   noteInput:   { width: "100%", background: "#fff", border: "1.5px solid #e2e8f0", borderRadius: 14, padding: "12px 14px", fontSize: 14, resize: "none", outline: "none", fontFamily: "inherit", color: "#1e293b", lineHeight: 1.6, marginTop: 4 },
-
   summaryCard: { background: "#fff", borderRadius: 14, padding: "16px", border: "1px solid #f1f5f9", marginTop: 4, boxShadow: "0 1px 3px rgba(0,0,0,0.04)" },
   summaryLine: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 },
   summaryKey:  { fontSize: 14, color: "#64748b" },
@@ -506,26 +614,53 @@ const ss = {
   summaryKeyBold:{ fontSize: 15, fontWeight: 700, color: "#1e293b" },
   summaryBig:  { fontSize: 22, fontWeight: 800, color: "#1e293b", letterSpacing: -0.5 },
   divider:     { height: 1, background: "#f1f5f9", margin: "10px 0" },
-
   cartFooter:  { position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, background: "#fff", padding: "12px 18px 24px", borderTop: "1px solid #f1f5f9", zIndex: 60 },
   confirmBtn:  { width: "100%", background: "#1e293b", color: "#fff", border: "none", borderRadius: 16, padding: "16px 20px", fontSize: 16, fontWeight: 700, cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", letterSpacing: 0.1, transition: "opacity 0.15s" },
   confirmAmt:  { fontSize: 16, fontWeight: 800 },
 
-  // Empty cart
   emptyState:  { display: "flex", flexDirection: "column", alignItems: "center", padding: "60px 20px", gap: 12 },
   emptyIco:    { width: 80, height: 80, background: "#f8fafc", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", border: "2px solid #f1f5f9", marginBottom: 4 },
   emptyTxt:    { fontSize: 18, fontWeight: 700, color: "#1e293b" },
   emptyHint:   { fontSize: 14, color: "#94a3b8" },
   goMenuBtn:   { marginTop: 8, background: "#1e293b", color: "#fff", border: "none", borderRadius: 12, padding: "12px 28px", fontSize: 15, fontWeight: 700, cursor: "pointer" },
 
-  // Success screen
-  successPage: { minHeight: "100dvh", background: "#f8fafc", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Plus Jakarta Sans', sans-serif", padding: 24 },
-  successBox:  { background: "#fff", borderRadius: 24, padding: "40px 32px", textAlign: "center", width: "100%", maxWidth: 380, boxShadow: "0 4px 32px rgba(0,0,0,0.08)", animation: "fadeUp 0.4s ease" },
-  checkCircle: { width: 80, height: 80, background: "#16a34a", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px", animation: "popIn 0.5s ease" },
-  successTitle:{ fontSize: 26, fontWeight: 800, color: "#1e293b", marginBottom: 6, letterSpacing: -0.5 },
-  successSub:  { fontSize: 14, color: "#64748b", marginBottom: 20 },
-  successAmt:  { fontSize: 36, fontWeight: 800, color: "#1e293b", letterSpacing: -1, marginBottom: 12 },
-  successNote: { fontSize: 14, color: "#94a3b8", lineHeight: 1.6 },
+  // ── SUCCESS screen ────────────────────────────────────────────────────────
+  successPage:  { minHeight: "100dvh", background: "#f8fafc", display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "'Plus Jakarta Sans', sans-serif", padding: 24 },
+  successBox:   { background: "#fff", borderRadius: 24, padding: "36px 28px 28px", textAlign: "center", width: "100%", maxWidth: 380, boxShadow: "0 4px 32px rgba(0,0,0,0.08)", animation: "fadeUp 0.4s ease", display: "flex", flexDirection: "column", gap: 8, alignItems: "center" },
+  checkCircle:  { width: 80, height: 80, borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", animation: "popIn 0.5s ease", marginBottom: 4 },
+  successTitle: { fontSize: 24, fontWeight: 800, color: "#1e293b", letterSpacing: -0.5 },
+  successSub:   { fontSize: 14, color: "#64748b" },
+  successAmt:   { fontSize: 36, fontWeight: 800, color: "#1e293b", letterSpacing: -1, margin: "4px 0 8px" },
+  successNote:  { fontSize: 13, color: "#94a3b8", lineHeight: 1.6, marginTop: 4 },
+
+  // ETA card on success screen
+  etaCard: {
+    width: "100%",
+    background: "#f0f9ff",
+    border: "1.5px solid #bae6fd",
+    borderRadius: 16,
+    padding: "16px 18px",
+    textAlign: "left",
+    display: "flex", flexDirection: "column", gap: 8,
+  },
+  etaCardTop:   { display: "flex", alignItems: "center", gap: 8 },
+  etaCardIcon:  { fontSize: 18 },
+  etaCardTitle: { fontSize: 12, fontWeight: 700, color: "#0369a1", letterSpacing: 0.3, textTransform: "uppercase" },
+  etaCountdown: { fontSize: 42, fontWeight: 800, color: "#1e293b", letterSpacing: -2, lineHeight: 1, fontVariantNumeric: "tabular-nums" },
+  etaReadyAt:   { fontSize: 13, color: "#475569", fontWeight: 600 },
+  etaBarWrap:   { marginTop: 4 },
+  progressTrack:{ height: 6, background: "#e0f2fe", borderRadius: 99, overflow: "hidden" },
+  progressFill: { height: "100%", background: "linear-gradient(90deg, #38bdf8, #0ea5e9)", borderRadius: 99, transition: "width 1s linear" },
+  etaHint:      { fontSize: 11, color: "#94a3b8", textAlign: "center" },
+
+  etaDoneMsg:   { fontSize: 15, fontWeight: 600, color: "#15803d", lineHeight: 1.7, textAlign: "center" },
+
+  // Waiting dots card
+  waitingCard:  { width: "100%", background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 16, padding: "16px", display: "flex", flexDirection: "column", alignItems: "center", gap: 10 },
+  waitingDots:  { display: "flex", alignItems: "center" },
+  waitingTxt:   { fontSize: 13, color: "#94a3b8", textAlign: "center" },
+
+  backToMenuBtn: { marginTop: 8, background: "transparent", border: "1.5px solid #e2e8f0", color: "#64748b", borderRadius: 12, padding: "12px 28px", fontSize: 14, fontWeight: 700, cursor: "pointer", width: "100%" },
 };
 
 export default Customer;
