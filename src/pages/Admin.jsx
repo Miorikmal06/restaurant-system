@@ -1,46 +1,58 @@
-import { useEffect, useState } from "react";
-import { collection, onSnapshot, doc, updateDoc, deleteDoc } from "firebase/firestore";
+import { useEffect, useState, useCallback } from "react";
+import {
+  collection, onSnapshot, doc, updateDoc, deleteDoc,
+  query, where, Timestamp, writeBatch
+} from "firebase/firestore";
 import { db } from "../firebase";
 
-// ─── CONFIG ───────────────────────────────────────────────────────────────────
-const STATUS = {
-  pending:   { label: "Menunggu",   color: "#f59e0b", bg: "#fffbeb", next: "preparing", nextLabel: "Mula Sediakan" },
-  preparing: { label: "Disediakan", color: "#3b82f6", bg: "#eff6ff", next: "ready",     nextLabel: "Sedia Hantar" },
-  ready:     { label: "Sedia",      color: "#8b5cf6", bg: "#f5f3ff", next: "completed", nextLabel: "Tandakan Selesai" },
-  completed: { label: "Selesai",    color: "#10b981", bg: "#ecfdf5", next: null,         nextLabel: null },
-};
-const STATUS_ORDER = ["pending", "preparing", "ready", "completed"];
-
-function timeAgo(ts) {
-  if (!ts) return "—";
-  const d = ts.toDate ? ts.toDate() : new Date(ts);
-  const diff = Math.floor((Date.now() - d.getTime()) / 1000);
-  if (diff < 60) return `${diff}s`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m`;
-  return `${Math.floor(diff / 3600)}j`;
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
+function todayStart() {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return Timestamp.fromDate(d);
 }
+
 function fmtTime(ts) {
   if (!ts) return "—";
   const d = ts.toDate ? ts.toDate() : new Date(ts);
   return d.toLocaleTimeString("ms-MY", { hour: "2-digit", minute: "2-digit" });
 }
+
+function timeAgo(ts) {
+  if (!ts) return "—";
+  const d = ts.toDate ? ts.toDate() : new Date(ts);
+  const diff = Math.floor((Date.now() - d.getTime()) / 1000);
+  if (diff < 60) return `${diff}s lalu`;
+  if (diff < 3600) return `${Math.floor(diff / 60)}min lalu`;
+  return `${Math.floor(diff / 3600)}j lalu`;
+}
+
 function fmtDate(d) {
-  return d.toLocaleDateString("ms-MY", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  return d.toLocaleDateString("ms-MY", {
+    weekday: "long", day: "numeric", month: "long", year: "numeric",
+  });
 }
 
 const TEMP_LABEL = { hot: "Panas", cold: "Sejuk", iced: "Ais" };
 
+// ─── COMPONENT ───────────────────────────────────────────────────────────────
 export default function Admin() {
   const [orders, setOrders]       = useState([]);
-  const [filter, setFilter]       = useState("all");
+  const [filter, setFilter]       = useState("active"); // active | completed | all
   const [search, setSearch]       = useState("");
   const [now, setNow]             = useState(Date.now());
   const [confirmDel, setConfirmDel] = useState(null);
   const [updating, setUpdating]   = useState({});
-  const [view, setView]           = useState("kanban"); // kanban | list
+  const [showClearConfirm, setShowClearConfirm] = useState(false);
+  const [sideOpen, setSideOpen]   = useState(true);
 
+  // ── Real-time listener: today's orders only ──────────────────────────────
   useEffect(() => {
-    const unsub = onSnapshot(collection(db, "orders"), snap => {
+    const q = query(
+      collection(db, "orders"),
+      where("createdAt", ">=", todayStart())
+    );
+    const unsub = onSnapshot(q, snap => {
       const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
       data.sort((a, b) => {
         const ta = a.createdAt?.toDate?.() ?? new Date(0);
@@ -52,309 +64,343 @@ export default function Admin() {
     return unsub;
   }, []);
 
+  // ── Clock tick ────────────────────────────────────────────────────────────
   useEffect(() => {
     const t = setInterval(() => setNow(Date.now()), 15000);
     return () => clearInterval(t);
   }, []);
 
-  const updateStatus = async (id, newStatus) => {
+  // ── Auto-clear: delete yesterday's completed orders once per session ──────
+  useEffect(() => {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    yesterday.setHours(23, 59, 59, 999);
+    const q = query(
+      collection(db, "orders"),
+      where("status", "==", "completed"),
+      where("createdAt", "<", Timestamp.fromDate(yesterday))
+    );
+    import("firebase/firestore").then(({ getDocs, writeBatch: wb }) => {
+      getDocs(q).then(snap => {
+        if (snap.empty) return;
+        const batch = wb(db);
+        snap.docs.forEach(d => batch.delete(d.ref));
+        batch.commit();
+      });
+    });
+  }, []);
+
+  // ── Actions ───────────────────────────────────────────────────────────────
+  const completeOrder = async (id) => {
     setUpdating(p => ({ ...p, [id]: true }));
-    await updateDoc(doc(db, "orders", id), { status: newStatus });
+    await updateDoc(doc(db, "orders", id), { status: "completed", completedAt: Timestamp.now() });
     setUpdating(p => ({ ...p, [id]: false }));
   };
-  const deleteOrder = async (id) => { await deleteDoc(doc(db, "orders", id)); setConfirmDel(null); };
+
+  const deleteOrder = async (id) => {
+    await deleteDoc(doc(db, "orders", id));
+    setConfirmDel(null);
+  };
+
+  const clearAllCompleted = async () => {
+    const completed = orders.filter(o => o.status === "completed");
+    const { writeBatch: wb } = await import("firebase/firestore");
+    const batch = wb(db);
+    completed.forEach(o => batch.delete(doc(db, "orders", o.id)));
+    await batch.commit();
+    setShowClearConfirm(false);
+  };
+
+  // ── Derived stats ─────────────────────────────────────────────────────────
+  const active    = orders.filter(o => o.status !== "completed");
+  const completed = orders.filter(o => o.status === "completed");
+  const revenue   = completed.reduce((s, o) => s + (o.total || 0), 0);
+  const urgent    = active.filter(o => {
+    const mins = o.createdAt
+      ? Math.floor((Date.now() - (o.createdAt.toDate?.() ?? new Date(o.createdAt)).getTime()) / 60000)
+      : 0;
+    return mins > 15;
+  });
 
   const filtered = orders.filter(o => {
-    const mf = filter === "all" || o.status === filter;
-    const ms = !search || String(o.table).includes(search) || o.items?.some(i => i.name?.toLowerCase().includes(search.toLowerCase()));
+    const mf =
+      filter === "all" ? true :
+      filter === "active" ? o.status !== "completed" :
+      o.status === "completed";
+    const ms = !search ||
+      String(o.table).includes(search) ||
+      o.items?.some(i => i.name?.toLowerCase().includes(search.toLowerCase()));
     return mf && ms;
   });
 
-  const counts  = STATUS_ORDER.reduce((a, s) => { a[s] = orders.filter(o => o.status === s).length; return a; }, {});
-  const revenue = orders.filter(o => o.status === "completed").reduce((s, o) => s + (o.total || 0), 0);
-  const activeC = orders.filter(o => o.status !== "completed").length;
-  const avgOrder = orders.length > 0 ? (orders.reduce((s, o) => s + (o.total || 0), 0) / orders.length) : 0;
-  const urgentC = orders.filter(o => {
-    if (o.status === "completed") return false;
-    const mins = o.createdAt ? Math.floor((Date.now() - (o.createdAt.toDate?.() ?? new Date(o.createdAt)).getTime()) / 60000) : 0;
-    return mins > 15;
-  }).length;
-
   return (
-    <div style={s.root}>
-      <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=DM+Sans:wght@300;400;500;600;700&display=swap');
-        * { box-sizing: border-box; }
-        ::-webkit-scrollbar { width: 4px; }
-        ::-webkit-scrollbar-track { background: transparent; }
-        ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 4px; }
-        .order-card { transition: box-shadow 0.2s; }
-        .order-card:hover { box-shadow: 0 4px 20px rgba(0,0,0,0.08) !important; }
-        @keyframes fadeIn { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
-        .fade-in { animation: fadeIn 0.25s ease both; }
-      `}</style>
+    <div style={css.root}>
+      <style>{globalCSS}</style>
 
-      {/* Sidebar */}
-      <aside style={s.sidebar}>
-        <div style={s.sideHead}>
-          <div style={s.logoMark}>WS</div>
-          <div>
-            <div style={s.logoName}>Warung Selera</div>
-            <div style={s.logoRole}>Papan Pemantauan</div>
-          </div>
+      {/* ── SIDEBAR ─────────────────────────────────────────────────────── */}
+      <aside style={{ ...css.sidebar, ...(sideOpen ? {} : css.sidebarCollapsed) }}>
+        {/* Logo */}
+        <div style={css.brand}>
+          <div style={css.brandMark}>W</div>
+          {sideOpen && (
+            <div style={css.brandText}>
+              <div style={css.brandName}>Warung Selera</div>
+              <div style={css.brandSub}>Sistem Pesanan</div>
+            </div>
+          )}
+          <button style={css.collapseBtn} onClick={() => setSideOpen(p => !p)}>
+            {sideOpen ? "‹" : "›"}
+          </button>
         </div>
 
-        {/* Metrics */}
-        <div style={s.metricsGrid}>
-          <div style={s.metric}>
-            <div style={s.metricVal}>{activeC}</div>
-            <div style={s.metricLbl}>Aktif</div>
+        {/* Stats */}
+        {sideOpen && (
+          <div style={css.statsBlock}>
+            <div style={css.statCard}>
+              <div style={css.statVal}>{active.length}</div>
+              <div style={css.statLabel}>Pesanan Aktif</div>
+            </div>
+            <div style={{ ...css.statCard, ...(urgent.length > 0 ? css.statCardUrgent : {}) }}>
+              <div style={{ ...css.statVal, color: urgent.length > 0 ? "#dc6939" : "inherit" }}>
+                {urgent.length}
+              </div>
+              <div style={css.statLabel}>Menunggu Lama</div>
+            </div>
+            <div style={css.statCardWide}>
+              <div style={{ ...css.statVal, fontSize: 22 }}>RM {revenue.toFixed(2)}</div>
+              <div style={css.statLabel}>Hasil Hari Ini · {completed.length} selesai</div>
+            </div>
           </div>
-          <div style={s.metric}>
-            <div style={{ ...s.metricVal, color: urgentC > 0 ? "#ef4444" : "#fff" }}>{urgentC}</div>
-            <div style={s.metricLbl}>Lambat</div>
-          </div>
-          <div style={{ ...s.metric, gridColumn: "1 / -1" }}>
-            <div style={{ ...s.metricVal, fontSize: 22 }}>RM {revenue.toFixed(2)}</div>
-            <div style={s.metricLbl}>Hasil Hari Ini</div>
-          </div>
-          <div style={s.metric}>
-            <div style={{ ...s.metricVal, fontSize: 18 }}>RM {avgOrder.toFixed(0)}</div>
-            <div style={s.metricLbl}>Purata Order</div>
-          </div>
-          <div style={s.metric}>
-            <div style={{ ...s.metricVal, fontSize: 18 }}>{orders.length}</div>
-            <div style={s.metricLbl}>Jumlah Order</div>
-          </div>
-        </div>
+        )}
 
         {/* Nav */}
-        <div style={s.navSection}>
-          <div style={s.navLabel}>PAPARAN</div>
-          <button onClick={() => setFilter("all")} style={{ ...s.navBtn, ...(filter === "all" ? s.navBtnActive : {}) }}>
-            <span style={s.navDot("#64748b")} />
-            <span style={s.navText}>Semua</span>
-            <span style={s.navBadge}>{orders.length}</span>
-          </button>
-          {STATUS_ORDER.map(st => {
-            const cfg = STATUS[st];
-            const act = filter === st;
-            return (
-              <button key={st} onClick={() => setFilter(st)}
-                style={{ ...s.navBtn, ...(act ? { ...s.navBtnActive, background: cfg.color + "15" } : {}) }}>
-                <span style={s.navDot(cfg.color)} />
-                <span style={{ ...s.navText, color: act ? cfg.color : "rgba(255,255,255,0.55)" }}>{cfg.label}</span>
-                <span style={{ ...s.navBadge, background: cfg.color + "22", color: cfg.color }}>{counts[st]}</span>
-              </button>
-            );
-          })}
-        </div>
+        <nav style={css.nav}>
+          {[
+            { key: "active",    icon: "⬡", label: "Pesanan Aktif",   count: active.length },
+            { key: "completed", icon: "✓", label: "Selesai",          count: completed.length },
+            { key: "all",       icon: "≡", label: "Semua",            count: orders.length },
+          ].map(item => (
+            <button
+              key={item.key}
+              onClick={() => setFilter(item.key)}
+              style={{ ...css.navItem, ...(filter === item.key ? css.navItemActive : {}) }}
+            >
+              <span style={css.navIcon}>{item.icon}</span>
+              {sideOpen && (
+                <>
+                  <span style={css.navLabel}>{item.label}</span>
+                  <span style={{ ...css.navCount, ...(filter === item.key ? css.navCountActive : {}) }}>
+                    {item.count}
+                  </span>
+                </>
+              )}
+            </button>
+          ))}
+        </nav>
 
-        <div style={s.sideFooter}>
-          <div style={s.clock}>
-            {new Date(now).toLocaleTimeString("ms-MY", { hour: "2-digit", minute: "2-digit" })}
+        {sideOpen && completed.length > 0 && (
+          <button style={css.clearBtn} onClick={() => setShowClearConfirm(true)}>
+            Kosongkan Selesai
+          </button>
+        )}
+
+        {/* Clock */}
+        {sideOpen && (
+          <div style={css.clockBlock}>
+            <div style={css.clockTime}>
+              {new Date(now).toLocaleTimeString("ms-MY", { hour: "2-digit", minute: "2-digit" })}
+            </div>
+            <div style={css.clockDate}>{fmtDate(new Date())}</div>
           </div>
-          <div style={s.clockDate}>{fmtDate(new Date())}</div>
-        </div>
+        )}
       </aside>
 
-      {/* Main */}
-      <div style={s.main}>
+      {/* ── MAIN ────────────────────────────────────────────────────────── */}
+      <main style={css.main}>
         {/* Topbar */}
-        <div style={s.topbar}>
+        <header style={css.topbar}>
           <div>
-            <h1 style={s.pageTitle}>{filter === "all" ? "Semua Pesanan" : STATUS[filter]?.label}</h1>
-            <div style={s.pageSub}>{filtered.length} pesanan · Dikemaskini setiap 15s</div>
+            <h1 style={css.pageTitle}>
+              {filter === "active" ? "Pesanan Aktif" : filter === "completed" ? "Pesanan Selesai" : "Semua Pesanan"}
+            </h1>
+            <p style={css.pageSub}>{filtered.length} pesanan · dikemaskini setiap 15s</p>
           </div>
-          <div style={s.topbarRight}>
-            <div style={s.searchBox}>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
-              <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Cari meja atau item..." style={s.searchInput} />
-            </div>
-            <div style={s.viewToggle}>
-              <button onClick={() => setView("kanban")} style={{ ...s.viewBtn, ...(view === "kanban" ? s.viewBtnActive : {}) }} title="Kanban">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="3" y="3" width="7" height="18"/><rect x="14" y="3" width="7" height="18"/></svg>
-              </button>
-              <button onClick={() => setView("list")} style={{ ...s.viewBtn, ...(view === "list" ? s.viewBtnActive : {}) }} title="Senarai">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
-              </button>
+          <div style={css.topbarRight}>
+            <div style={css.searchWrap}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#9a8878" strokeWidth="2.5">
+                <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+              </svg>
+              <input
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                placeholder="Cari meja atau hidangan..."
+                style={css.searchInput}
+              />
             </div>
           </div>
-        </div>
+        </header>
 
-        {/* Pipeline strip */}
-        <div style={s.pipeline}>
-          {STATUS_ORDER.map((st, i) => {
-            const cfg = STATUS[st];
-            return (
-              <div key={st} style={s.pipeStep} onClick={() => setFilter(st)}>
-                <div style={{ ...s.pipeNum, color: cfg.color, borderColor: cfg.color + "50", background: cfg.bg, cursor: "pointer" }}>
-                  {counts[st]}
-                </div>
-                <div style={s.pipeLbl}>{cfg.label}</div>
-                {i < 3 && <div style={s.pipeArrow}>›</div>}
+        {/* Status strip */}
+        <div style={css.strip}>
+          <div style={css.stripItem}>
+            <span style={css.stripDot("#dc6939")} />
+            <span style={css.stripLabel}>Aktif</span>
+            <span style={{ ...css.stripCount, color: "#dc6939" }}>{active.length}</span>
+          </div>
+          <span style={css.stripDiv}>·</span>
+          <div style={css.stripItem}>
+            <span style={css.stripDot("#5a9e6f")} />
+            <span style={css.stripLabel}>Selesai</span>
+            <span style={{ ...css.stripCount, color: "#5a9e6f" }}>{completed.length}</span>
+          </div>
+          {urgent.length > 0 && (
+            <>
+              <span style={css.stripDiv}>·</span>
+              <div style={css.urgentPill}>
+                ⚠ {urgent.length} pesanan menunggu melebihi 15 minit
               </div>
-            );
-          })}
+            </>
+          )}
         </div>
 
-        {/* Content */}
-        <div style={s.content}>
+        {/* Cards grid */}
+        <div style={css.content}>
           {filtered.length === 0 ? (
-            <div style={s.emptyState}>
-              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="#e2e8f0" strokeWidth="1"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
-              <div style={s.emptyTitle}>Tiada pesanan ditemui</div>
-              <div style={s.emptySub}>Tiada rekod dalam kategori ini buat masa ini</div>
+            <div style={css.empty}>
+              <div style={css.emptyIcon}>◌</div>
+              <div style={css.emptyTitle}>Tiada pesanan</div>
+              <div style={css.emptySub}>Tiada rekod buat masa ini</div>
             </div>
-          ) : view === "kanban" ? (
-            <div style={s.grid}>
+          ) : (
+            <div style={css.grid}>
               {filtered.map((order, idx) => {
-                const cfg = STATUS[order.status] || STATUS.pending;
-                const isUpd = updating[order.id];
+                const isActive  = order.status !== "completed";
+                const isUpd     = updating[order.id];
                 const mins = order.createdAt
                   ? Math.floor((Date.now() - (order.createdAt.toDate?.() ?? new Date(order.createdAt)).getTime()) / 60000)
                   : 0;
-                const isUrgent = order.status !== "completed" && mins > 15;
+                const isUrgent = isActive && mins > 15;
                 return (
-                  <div key={order.id} className="order-card fade-in"
-                    style={{ ...s.card, ...(isUrgent ? s.cardUrgent : {}), animationDelay: `${idx * 30}ms`, borderTop: `3px solid ${cfg.color}` }}>
-                    
-                    {/* Card header */}
-                    <div style={s.cardTop}>
-                      <div style={s.tableTag}>
-                        <span style={s.tableTagTxt}>Meja {order.table}</span>
+                  <div
+                    key={order.id}
+                    className="order-card"
+                    style={{
+                      ...css.card,
+                      ...(isUrgent ? css.cardUrgent : {}),
+                      ...(!isActive ? css.cardDone : {}),
+                      animationDelay: `${idx * 25}ms`,
+                    }}
+                  >
+                    {/* Card top */}
+                    <div style={css.cardHead}>
+                      <div style={css.tableChip}>
+                        <span style={css.tableNum}>{order.table}</span>
+                        <span style={css.tableLbl}>Meja</span>
                       </div>
-                      <div style={s.cardTopRight}>
-                        {isUrgent && <span style={s.urgentTag}>Lambat</span>}
-                        <span style={{ ...s.statusTag, color: cfg.color, background: cfg.bg }}>{cfg.label}</span>
+                      <div style={css.cardHeadRight}>
+                        {isUrgent && <span style={css.urgentTag}>Lambat</span>}
+                        <span style={{ ...css.statusPill, ...(isActive ? css.pillActive : css.pillDone) }}>
+                          {isActive ? "Aktif" : "Selesai"}
+                        </span>
                       </div>
                     </div>
 
                     {/* Time */}
-                    <div style={s.timeRow}>
-                      <span style={s.timeTxt}>{fmtTime(order.createdAt)}</span>
-                      <span style={s.agoBadge}>
-                        {timeAgo(order.createdAt)} lepas
-                        {isUrgent && <span style={{ color: "#ef4444", marginLeft: 4 }}>· {mins}m</span>}
-                      </span>
+                    <div style={css.timeRow}>
+                      <span style={css.timeFmt}>{fmtTime(order.createdAt)}</span>
+                      <span style={css.timeAgo}>{timeAgo(order.createdAt)}</span>
                     </div>
 
+                    {/* Divider */}
+                    <div style={css.divider} />
+
                     {/* Items */}
-                    <div style={s.itemBlock}>
+                    <div style={css.items}>
                       {order.items?.map((item, i) => (
-                        <div key={i} style={s.itemRow}>
-                          <span style={s.itemQty}>{item.qty}×</span>
-                          <span style={s.itemName}>{item.name}</span>
-                          {item.temp && <span style={s.itemTemp}>{TEMP_LABEL[item.temp] || item.temp}</span>}
-                          <span style={s.itemPrice}>RM {(item.price * item.qty).toFixed(2)}</span>
+                        <div key={i} style={css.itemRow}>
+                          <span style={css.itemQty}>{item.qty}×</span>
+                          <span style={css.itemName}>{item.name}</span>
+                          {item.temp && (
+                            <span style={css.itemTemp}>{TEMP_LABEL[item.temp] || item.temp}</span>
+                          )}
+                          <span style={css.itemPrice}>RM {(item.price * item.qty).toFixed(2)}</span>
                         </div>
                       ))}
                     </div>
 
                     {/* Note */}
                     {order.note && (
-                      <div style={s.noteBox}>
-                        <span style={s.noteIcon}>
-                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-                        </span>
-                        <span style={s.noteTxt}>{order.note}</span>
+                      <div style={css.note}>
+                        <span style={css.noteQ}>"</span>
+                        <span style={css.noteTxt}>{order.note}</span>
                       </div>
                     )}
 
                     {/* Total */}
-                    <div style={s.totalRow}>
-                      <span style={s.totalLbl}>Jumlah</span>
-                      <span style={s.totalAmt}>RM {Number(order.total).toFixed(2)}</span>
+                    <div style={css.totalRow}>
+                      <span style={css.totalLbl}>Jumlah</span>
+                      <span style={css.totalAmt}>RM {Number(order.total).toFixed(2)}</span>
                     </div>
 
                     {/* Actions */}
-                    <div style={s.actions}>
-                      {cfg.next ? (
-                        <button disabled={isUpd} onClick={() => updateStatus(order.id, cfg.next)}
-                          style={{ ...s.actionBtn, background: cfg.color, opacity: isUpd ? 0.6 : 1 }}>
-                          {isUpd ? "Mengemas..." : cfg.nextLabel}
+                    <div style={css.actions}>
+                      {isActive ? (
+                        <button
+                          disabled={isUpd}
+                          onClick={() => completeOrder(order.id)}
+                          style={{ ...css.doneBtn, opacity: isUpd ? 0.6 : 1 }}
+                        >
+                          {isUpd ? "Mengemas..." : "✓  Tandakan Selesai"}
                         </button>
                       ) : (
-                        <div style={s.completedTag}>Pesanan Selesai</div>
+                        <div style={css.doneTag}>Pesanan Selesai</div>
                       )}
-                      <button onClick={() => setConfirmDel(order.id)} style={s.delBtn} title="Padam">
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+                      <button
+                        onClick={() => setConfirmDel(order.id)}
+                        style={css.delBtn}
+                        title="Padam pesanan"
+                      >
+                        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <polyline points="3 6 5 6 21 6"/>
+                          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/>
+                        </svg>
                       </button>
                     </div>
                   </div>
                 );
               })}
             </div>
-          ) : (
-            /* LIST VIEW */
-            <div style={s.listWrap}>
-              <table style={s.table}>
-                <thead>
-                  <tr style={s.thead}>
-                    <th style={s.th}>Meja</th>
-                    <th style={s.th}>Masa</th>
-                    <th style={s.th}>Item</th>
-                    <th style={s.th}>Nota</th>
-                    <th style={s.th}>Jumlah</th>
-                    <th style={s.th}>Status</th>
-                    <th style={s.th}>Tindakan</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.map(order => {
-                    const cfg = STATUS[order.status] || STATUS.pending;
-                    const isUpd = updating[order.id];
-                    const mins = order.createdAt
-                      ? Math.floor((Date.now() - (order.createdAt.toDate?.() ?? new Date(order.createdAt)).getTime()) / 60000)
-                      : 0;
-                    const isUrgent = order.status !== "completed" && mins > 15;
-                    return (
-                      <tr key={order.id} style={{ ...s.tr, background: isUrgent ? "#fff5f5" : "#fff" }}>
-                        <td style={s.td}><span style={s.tableTagSm}>Meja {order.table}</span></td>
-                        <td style={s.td}>
-                          <div style={{ fontSize: 13, fontWeight: 600 }}>{fmtTime(order.createdAt)}</div>
-                          <div style={{ fontSize: 11, color: "#94a3b8" }}>{timeAgo(order.createdAt)} lepas</div>
-                        </td>
-                        <td style={{ ...s.td, maxWidth: 200 }}>
-                          {order.items?.map((item, i) => (
-                            <div key={i} style={{ fontSize: 12, color: "#374151" }}>
-                              {item.qty}× {item.name}{item.temp ? ` (${TEMP_LABEL[item.temp]||item.temp})` : ""}
-                            </div>
-                          ))}
-                        </td>
-                        <td style={s.td}><span style={{ fontSize: 12, color: "#64748b" }}>{order.note || "—"}</span></td>
-                        <td style={s.td}><span style={{ fontSize: 14, fontWeight: 700 }}>RM {Number(order.total).toFixed(2)}</span></td>
-                        <td style={s.td}><span style={{ ...s.statusTag, color: cfg.color, background: cfg.bg }}>{cfg.label}</span></td>
-                        <td style={s.td}>
-                          <div style={{ display: "flex", gap: 6 }}>
-                            {cfg.next && (
-                              <button disabled={isUpd} onClick={() => updateStatus(order.id, cfg.next)}
-                                style={{ ...s.actionBtnSm, background: cfg.color }}>
-                                {isUpd ? "..." : "→ " + cfg.nextLabel}
-                              </button>
-                            )}
-                            <button onClick={() => setConfirmDel(order.id)} style={s.delBtnSm}>Padam</button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
           )}
         </div>
-      </div>
+      </main>
 
-      {/* Delete modal */}
+      {/* ── DELETE MODAL ────────────────────────────────────────────────── */}
       {confirmDel && (
-        <div style={s.modalBg} onClick={() => setConfirmDel(null)}>
-          <div style={s.modal} onClick={e => e.stopPropagation()}>
-            <div style={s.modalTitle}>Padam Pesanan?</div>
-            <div style={s.modalSub}>Tindakan ini tidak boleh dibatalkan dan rekod akan dipadamkan secara kekal.</div>
-            <div style={s.modalBtns}>
-              <button onClick={() => setConfirmDel(null)} style={s.modalCancel}>Batal</button>
-              <button onClick={() => deleteOrder(confirmDel)} style={s.modalDel}>Padam</button>
+        <div style={css.modalBg} onClick={() => setConfirmDel(null)}>
+          <div style={css.modal} onClick={e => e.stopPropagation()}>
+            <div style={css.modalIcon}>✕</div>
+            <div style={css.modalTitle}>Padam Pesanan?</div>
+            <div style={css.modalSub}>Rekod ini akan dipadamkan secara kekal dan tidak boleh dipulihkan.</div>
+            <div style={css.modalBtns}>
+              <button onClick={() => setConfirmDel(null)} style={css.btnCancel}>Batal</button>
+              <button onClick={() => deleteOrder(confirmDel)} style={css.btnDel}>Padam</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── CLEAR COMPLETED MODAL ───────────────────────────────────────── */}
+      {showClearConfirm && (
+        <div style={css.modalBg} onClick={() => setShowClearConfirm(false)}>
+          <div style={css.modal} onClick={e => e.stopPropagation()}>
+            <div style={css.modalIcon}>⊘</div>
+            <div style={css.modalTitle}>Kosongkan Semua Selesai?</div>
+            <div style={css.modalSub}>
+              {completed.length} pesanan selesai akan dipadamkan. Hasil akan tetap dikira.
+            </div>
+            <div style={css.modalBtns}>
+              <button onClick={() => setShowClearConfirm(false)} style={css.btnCancel}>Batal</button>
+              <button onClick={clearAllCompleted} style={css.btnDel}>Kosongkan</button>
             </div>
           </div>
         </div>
@@ -363,103 +409,344 @@ export default function Admin() {
   );
 }
 
+// ─── GLOBAL CSS ──────────────────────────────────────────────────────────────
+const globalCSS = `
+  @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,300&display=swap');
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  ::-webkit-scrollbar { width: 3px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(180,160,140,0.25); border-radius: 3px; }
+  .order-card { animation: rise 0.3s ease both; }
+  .order-card:hover { transform: translateY(-2px); box-shadow: 0 12px 40px rgba(90,60,30,0.1) !important; transition: transform 0.2s, box-shadow 0.2s; }
+  @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+`;
+
 // ─── STYLES ──────────────────────────────────────────────────────────────────
-const s = {
-  root:         { display: "flex", minHeight: "100vh", background: "#f1f5f9", fontFamily: "'DM Sans', sans-serif", color: "#0f172a" },
+const CREAM   = "#faf7f2";
+const PAPER   = "#f5f0e8";
+const SAND    = "#ede7db";
+const DARK    = "#1c1410";
+const BROWN   = "#3d2b1f";
+const MID     = "#7a6050";
+const MUTED   = "#a89080";
+const ACCENT  = "#b85c38";  // warm terracotta
+const GREEN   = "#5a9e6f";
+const GOLD    = "#c49a3c";
 
-  sidebar:      { width: 248, background: "#0f172a", display: "flex", flexDirection: "column", flexShrink: 0, position: "sticky", top: 0, height: "100vh", overflowY: "auto" },
-  sideHead:     { display: "flex", alignItems: "center", gap: 12, padding: "24px 20px 20px" },
-  logoMark:     { width: 38, height: 38, background: "#e8334a", borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 13, fontWeight: 700, color: "#fff", fontFamily: "'Playfair Display', serif", letterSpacing: -0.5, flexShrink: 0 },
-  logoName:     { fontSize: 15, fontWeight: 700, color: "#fff", fontFamily: "'Playfair Display', serif", letterSpacing: -0.3 },
-  logoRole:     { fontSize: 10, color: "rgba(255,255,255,0.35)", letterSpacing: 1.2, marginTop: 1 },
+const css = {
+  root: {
+    display: "flex",
+    minHeight: "100vh",
+    background: CREAM,
+    fontFamily: "'DM Sans', sans-serif",
+    color: DARK,
+  },
 
-  metricsGrid:  { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, padding: "0 16px 20px" },
-  metric:       { background: "rgba(255,255,255,0.06)", borderRadius: 10, padding: "12px 14px", border: "1px solid rgba(255,255,255,0.07)" },
-  metricVal:    { fontSize: 20, fontWeight: 700, color: "#fff", letterSpacing: -0.5 },
-  metricLbl:    { fontSize: 10, color: "rgba(255,255,255,0.35)", marginTop: 3, letterSpacing: 0.5 },
+  // ── Sidebar ──────────────────────────────────────────────────────────
+  sidebar: {
+    width: 260,
+    background: BROWN,
+    display: "flex",
+    flexDirection: "column",
+    flexShrink: 0,
+    position: "sticky",
+    top: 0,
+    height: "100vh",
+    overflowY: "auto",
+    transition: "width 0.25s ease",
+  },
+  sidebarCollapsed: { width: 64 },
 
-  navSection:   { padding: "0 12px", flex: 1 },
-  navLabel:     { fontSize: 10, fontWeight: 700, color: "rgba(255,255,255,0.25)", letterSpacing: 1.5, padding: "0 10px", marginBottom: 8 },
-  navBtn:       { display: "flex", alignItems: "center", gap: 9, width: "100%", padding: "9px 12px", borderRadius: 9, border: "none", background: "transparent", cursor: "pointer", textAlign: "left", marginBottom: 2 },
-  navBtnActive: { background: "rgba(255,255,255,0.09)" },
-  navDot:       (c) => ({ width: 7, height: 7, borderRadius: "50%", background: c, flexShrink: 0 }),
-  navText:      { flex: 1, fontSize: 13, fontWeight: 500, color: "rgba(255,255,255,0.55)" },
-  navBadge:     { fontSize: 11, fontWeight: 700, borderRadius: 20, padding: "1px 8px", background: "rgba(255,255,255,0.1)", color: "rgba(255,255,255,0.4)" },
+  brand: {
+    display: "flex",
+    alignItems: "center",
+    gap: 12,
+    padding: "24px 16px 20px",
+    borderBottom: `1px solid rgba(255,255,255,0.07)`,
+  },
+  brandMark: {
+    width: 36, height: 36,
+    background: ACCENT,
+    borderRadius: 10,
+    display: "flex", alignItems: "center", justifyContent: "center",
+    fontFamily: "'Cormorant Garamond', serif",
+    fontSize: 18, fontWeight: 700, color: "#fff",
+    flexShrink: 0,
+    letterSpacing: -0.5,
+  },
+  brandText: { flex: 1, overflow: "hidden" },
+  brandName: {
+    fontFamily: "'Cormorant Garamond', serif",
+    fontSize: 16, fontWeight: 600, color: "#fff",
+    letterSpacing: 0.2, whiteSpace: "nowrap",
+  },
+  brandSub: {
+    fontSize: 10, color: "rgba(255,255,255,0.3)",
+    letterSpacing: 1.5, marginTop: 1, textTransform: "uppercase",
+  },
+  collapseBtn: {
+    background: "none", border: "none", color: "rgba(255,255,255,0.3)",
+    cursor: "pointer", fontSize: 18, padding: "2px 4px", lineHeight: 1,
+    flexShrink: 0, marginLeft: "auto",
+  },
 
-  sideFooter:   { padding: "16px 20px 24px", borderTop: "1px solid rgba(255,255,255,0.07)", marginTop: "auto" },
-  clock:        { fontSize: 28, fontWeight: 700, color: "#fff", letterSpacing: -1, fontFamily: "'Playfair Display', serif" },
-  clockDate:    { fontSize: 11, color: "rgba(255,255,255,0.3)", marginTop: 4, lineHeight: 1.5 },
+  statsBlock: { padding: "16px 14px", display: "flex", flexDirection: "column", gap: 8 },
+  statCard: {
+    background: "rgba(255,255,255,0.06)",
+    borderRadius: 10, padding: "12px 14px",
+    border: "1px solid rgba(255,255,255,0.06)",
+  },
+  statCardUrgent: { borderColor: "rgba(220,105,57,0.4)", background: "rgba(220,105,57,0.08)" },
+  statCardWide: {
+    background: "rgba(255,255,255,0.04)",
+    borderRadius: 10, padding: "12px 14px",
+    border: "1px solid rgba(255,255,255,0.06)",
+  },
+  statVal: {
+    fontSize: 26, fontWeight: 700, color: "#fff",
+    fontFamily: "'Cormorant Garamond', serif", letterSpacing: -0.5,
+  },
+  statLabel: { fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 3, letterSpacing: 0.8 },
 
-  main:         { flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" },
-  topbar:       { background: "#fff", borderBottom: "1px solid #e2e8f0", padding: "18px 28px", display: "flex", justifyContent: "space-between", alignItems: "center" },
-  pageTitle:    { fontSize: 20, fontWeight: 700, fontFamily: "'Playfair Display', serif", letterSpacing: -0.4 },
-  pageSub:      { fontSize: 12, color: "#94a3b8", marginTop: 2 },
-  topbarRight:  { display: "flex", gap: 10, alignItems: "center" },
-  searchBox:    { display: "flex", alignItems: "center", gap: 8, background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 9, padding: "9px 14px", minWidth: 220 },
-  searchInput:  { background: "transparent", border: "none", outline: "none", fontSize: 13, color: "#0f172a", width: "100%", fontFamily: "inherit" },
-  viewToggle:   { display: "flex", background: "#f1f5f9", borderRadius: 9, padding: 3, border: "1px solid #e2e8f0" },
-  viewBtn:      { background: "transparent", border: "none", borderRadius: 7, padding: "7px 10px", cursor: "pointer", color: "#94a3b8", display: "flex", alignItems: "center" },
-  viewBtnActive:{ background: "#fff", color: "#0f172a", boxShadow: "0 1px 4px rgba(0,0,0,0.08)" },
+  nav: { padding: "8px 10px", flex: 1 },
+  navItem: {
+    display: "flex", alignItems: "center", gap: 10,
+    width: "100%", padding: "10px 12px", borderRadius: 9,
+    border: "none", background: "transparent", cursor: "pointer",
+    color: "rgba(255,255,255,0.45)", marginBottom: 2, textAlign: "left",
+    transition: "background 0.15s, color 0.15s",
+  },
+  navItemActive: {
+    background: "rgba(255,255,255,0.1)",
+    color: "#fff",
+  },
+  navIcon:  { fontSize: 14, flexShrink: 0, width: 16, textAlign: "center" },
+  navLabel: { flex: 1, fontSize: 13, fontWeight: 500 },
+  navCount: {
+    fontSize: 11, fontWeight: 700,
+    background: "rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.35)",
+    borderRadius: 20, padding: "1px 8px",
+  },
+  navCountActive: { background: "rgba(255,255,255,0.15)", color: "#fff" },
 
-  pipeline:     { background: "#fff", borderBottom: "1px solid #e2e8f0", padding: "12px 28px", display: "flex", alignItems: "center", gap: 4 },
-  pipeStep:     { display: "flex", alignItems: "center", gap: 8 },
-  pipeNum:      { width: 36, height: 36, borderRadius: "50%", border: "2px solid", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 700, transition: "transform 0.15s" },
-  pipeLbl:      { fontSize: 12, fontWeight: 600, color: "#64748b" },
-  pipeArrow:    { fontSize: 18, color: "#cbd5e1", padding: "0 10px" },
+  clearBtn: {
+    margin: "0 14px 12px",
+    background: "rgba(220,105,57,0.12)",
+    border: "1px solid rgba(220,105,57,0.2)",
+    color: "#dc6939",
+    borderRadius: 9, padding: "9px 14px",
+    fontSize: 11, fontWeight: 600, cursor: "pointer",
+    letterSpacing: 0.3,
+  },
 
-  content:      { flex: 1, overflowY: "auto", padding: "20px 28px" },
+  clockBlock: {
+    padding: "16px 18px 24px",
+    borderTop: "1px solid rgba(255,255,255,0.07)",
+    marginTop: "auto",
+  },
+  clockTime: {
+    fontFamily: "'Cormorant Garamond', serif",
+    fontSize: 34, fontWeight: 600, color: "#fff",
+    letterSpacing: -1, lineHeight: 1,
+  },
+  clockDate: { fontSize: 11, color: "rgba(255,255,255,0.25)", marginTop: 6, lineHeight: 1.6 },
 
-  grid:         { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(290px, 1fr))", gap: 14 },
-  card:         { background: "#fff", borderRadius: 14, border: "1px solid #e2e8f0", padding: 16, display: "flex", flexDirection: "column", gap: 10 },
-  cardUrgent:   { border: "1px solid #fca5a5", background: "#fff7f7" },
-  cardTop:      { display: "flex", justifyContent: "space-between", alignItems: "center" },
-  tableTag:     { background: "#0f172a", borderRadius: 7, padding: "4px 10px" },
-  tableTagTxt:  { fontSize: 12, fontWeight: 700, color: "#fff" },
-  cardTopRight: { display: "flex", gap: 6, alignItems: "center" },
-  urgentTag:    { fontSize: 10, fontWeight: 700, color: "#ef4444", background: "#fef2f2", border: "1px solid #fecdd3", borderRadius: 20, padding: "2px 8px" },
-  statusTag:    { fontSize: 11, fontWeight: 700, borderRadius: 20, padding: "3px 10px" },
-  timeRow:      { display: "flex", justifyContent: "space-between" },
-  timeTxt:      { fontSize: 12, fontWeight: 600, color: "#374151" },
-  agoBadge:     { fontSize: 11, color: "#94a3b8" },
-  itemBlock:    { background: "#f8fafc", borderRadius: 9, padding: "8px 10px", display: "flex", flexDirection: "column", gap: 5, border: "1px solid #e8e8e8" },
-  itemRow:      { display: "flex", alignItems: "center", gap: 8 },
-  itemQty:      { fontSize: 13, fontWeight: 800, color: "#e8334a", minWidth: 22 },
-  itemName:     { flex: 1, fontSize: 12, color: "#0f172a" },
-  itemTemp:     { fontSize: 10, fontWeight: 600, color: "#3b82f6", background: "#eff6ff", borderRadius: 5, padding: "1px 6px" },
-  itemPrice:    { fontSize: 11, color: "#64748b", fontWeight: 600 },
-  noteBox:      { display: "flex", gap: 7, background: "#fefce8", border: "1px solid #fef08a", borderRadius: 8, padding: "7px 10px", alignItems: "flex-start" },
-  noteIcon:     { color: "#a16207", flexShrink: 0, marginTop: 1 },
-  noteTxt:      { fontSize: 12, color: "#854d0e", lineHeight: 1.45 },
-  totalRow:     { display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid #e8e8e8", paddingTop: 9 },
-  totalLbl:     { fontSize: 12, color: "#64748b" },
-  totalAmt:     { fontSize: 17, fontWeight: 700, fontFamily: "'Playfair Display', serif" },
-  actions:      { display: "flex", gap: 8 },
-  actionBtn:    { flex: 1, color: "#fff", border: "none", borderRadius: 9, padding: "10px 14px", fontSize: 12, fontWeight: 700, cursor: "pointer", letterSpacing: 0.2, transition: "opacity 0.15s" },
-  completedTag: { flex: 1, textAlign: "center", fontSize: 12, fontWeight: 600, color: "#10b981", background: "#ecfdf5", borderRadius: 9, padding: "10px", border: "1px solid #a7f3d0" },
-  delBtn:       { width: 36, height: 36, background: "#fff1f2", border: "1px solid #fecdd3", color: "#ef4444", borderRadius: 9, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 },
+  // ── Main ─────────────────────────────────────────────────────────────
+  main: { flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" },
 
-  // List view
-  listWrap:     { background: "#fff", borderRadius: 14, border: "1px solid #e2e8f0", overflow: "hidden" },
-  table:        { width: "100%", borderCollapse: "collapse" },
-  thead:        { background: "#f8fafc" },
-  th:           { padding: "12px 16px", textAlign: "left", fontSize: 11, fontWeight: 700, color: "#64748b", letterSpacing: 0.8, borderBottom: "1px solid #e2e8f0" },
-  tr:           { borderBottom: "1px solid #f1f5f9", transition: "background 0.15s" },
-  td:           { padding: "12px 16px", verticalAlign: "middle" },
-  tableTagSm:   { background: "#0f172a", borderRadius: 6, padding: "3px 9px", fontSize: 11, fontWeight: 700, color: "#fff" },
-  actionBtnSm:  { color: "#fff", border: "none", borderRadius: 7, padding: "6px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer", whiteSpace: "nowrap" },
-  delBtnSm:     { background: "#fff1f2", border: "1px solid #fecdd3", color: "#ef4444", borderRadius: 7, padding: "6px 12px", fontSize: 11, fontWeight: 700, cursor: "pointer" },
+  topbar: {
+    background: "#fff",
+    borderBottom: `1px solid ${SAND}`,
+    padding: "18px 28px",
+    display: "flex", justifyContent: "space-between", alignItems: "center",
+  },
+  pageTitle: {
+    fontFamily: "'Cormorant Garamond', serif",
+    fontSize: 24, fontWeight: 600, color: DARK,
+    letterSpacing: -0.3,
+  },
+  pageSub: { fontSize: 12, color: MUTED, marginTop: 3 },
+  topbarRight: { display: "flex", alignItems: "center", gap: 10 },
+  searchWrap: {
+    display: "flex", alignItems: "center", gap: 8,
+    background: CREAM, border: `1px solid ${SAND}`,
+    borderRadius: 10, padding: "9px 14px", minWidth: 240,
+  },
+  searchInput: {
+    background: "transparent", border: "none", outline: "none",
+    fontSize: 13, color: DARK, width: "100%", fontFamily: "inherit",
+  },
 
-  // Empty
-  emptyState:   { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: 80, gap: 12 },
-  emptyTitle:   { fontSize: 16, fontWeight: 600, color: "#374151" },
-  emptySub:     { fontSize: 13, color: "#94a3b8" },
+  strip: {
+    background: "#fff",
+    borderBottom: `1px solid ${SAND}`,
+    padding: "10px 28px",
+    display: "flex", alignItems: "center", gap: 12,
+    fontSize: 12,
+  },
+  stripItem:  { display: "flex", alignItems: "center", gap: 6 },
+  stripDot:   (c) => ({ width: 7, height: 7, borderRadius: "50%", background: c, display: "inline-block" }),
+  stripLabel: { color: MID, fontWeight: 500 },
+  stripCount: { fontWeight: 700 },
+  stripDiv:   { color: SAND, fontSize: 16 },
+  urgentPill: {
+    background: "#fff4ee", border: "1px solid #f5c9b0",
+    color: ACCENT, borderRadius: 20, padding: "2px 12px",
+    fontSize: 11, fontWeight: 600,
+  },
 
-  // Modal
-  modalBg:      { position: "fixed", inset: 0, background: "rgba(0,0,0,0.5)", zIndex: 999, display: "flex", alignItems: "center", justifyContent: "center" },
-  modal:        { background: "#fff", borderRadius: 16, padding: "28px 32px", width: 340, textAlign: "center" },
-  modalTitle:   { fontSize: 17, fontWeight: 700, fontFamily: "'Playfair Display', serif", marginBottom: 8 },
-  modalSub:     { fontSize: 13, color: "#64748b", marginBottom: 24, lineHeight: 1.5 },
-  modalBtns:    { display: "flex", gap: 10 },
-  modalCancel:  { flex: 1, background: "#f1f5f9", border: "none", borderRadius: 10, padding: 13, fontSize: 14, fontWeight: 600, cursor: "pointer", color: "#374151" },
-  modalDel:     { flex: 1, background: "#ef4444", border: "none", borderRadius: 10, padding: 13, fontSize: 14, fontWeight: 700, cursor: "pointer", color: "#fff" },
+  content: { flex: 1, overflowY: "auto", padding: "22px 28px" },
+
+  // ── Cards ─────────────────────────────────────────────────────────────
+  grid: {
+    display: "grid",
+    gridTemplateColumns: "repeat(auto-fill, minmax(288px, 1fr))",
+    gap: 14,
+  },
+  card: {
+    background: "#fff",
+    borderRadius: 16,
+    border: `1px solid ${SAND}`,
+    padding: 18,
+    display: "flex", flexDirection: "column", gap: 11,
+    boxShadow: "0 2px 12px rgba(90,60,30,0.04)",
+    borderTop: `3px solid ${ACCENT}`,
+  },
+  cardUrgent: {
+    borderColor: "#f5c9b0",
+    borderTop: `3px solid ${ACCENT}`,
+    background: "#fff9f6",
+  },
+  cardDone: {
+    borderTop: `3px solid ${GREEN}`,
+    opacity: 0.82,
+  },
+
+  cardHead: { display: "flex", justifyContent: "space-between", alignItems: "center" },
+  tableChip: {
+    display: "flex", flexDirection: "column", alignItems: "center",
+    background: DARK, borderRadius: 10, padding: "4px 12px", minWidth: 44,
+  },
+  tableNum: { fontSize: 16, fontWeight: 700, color: "#fff", fontFamily: "'Cormorant Garamond', serif", lineHeight: 1 },
+  tableLbl: { fontSize: 8, color: "rgba(255,255,255,0.4)", letterSpacing: 1.2, textTransform: "uppercase", marginTop: 1 },
+  cardHeadRight: { display: "flex", gap: 6, alignItems: "center" },
+  urgentTag: {
+    fontSize: 10, fontWeight: 700, color: ACCENT,
+    background: "#fff4ee", border: "1px solid #f5c9b0",
+    borderRadius: 20, padding: "2px 9px",
+  },
+  statusPill: { fontSize: 11, fontWeight: 600, borderRadius: 20, padding: "3px 10px" },
+  pillActive: { color: ACCENT, background: "#fff4ee", border: "1px solid #f5c9b0" },
+  pillDone:   { color: GREEN,  background: "#eef6f0", border: "1px solid #b8dfc3" },
+
+  timeRow: { display: "flex", justifyContent: "space-between", alignItems: "center" },
+  timeFmt: { fontSize: 13, fontWeight: 600, color: DARK },
+  timeAgo: { fontSize: 11, color: MUTED },
+
+  divider: { height: 1, background: SAND, margin: "0 -2px" },
+
+  items: {
+    background: CREAM,
+    borderRadius: 10, padding: "10px 12px",
+    display: "flex", flexDirection: "column", gap: 6,
+    border: `1px solid ${SAND}`,
+  },
+  itemRow:   { display: "flex", alignItems: "center", gap: 8 },
+  itemQty:   { fontSize: 13, fontWeight: 700, color: ACCENT, minWidth: 22 },
+  itemName:  { flex: 1, fontSize: 12, color: DARK },
+  itemTemp:  {
+    fontSize: 10, fontWeight: 600, color: "#3b7abf",
+    background: "#eef3fb", borderRadius: 5, padding: "1px 7px",
+  },
+  itemPrice: { fontSize: 11, color: MID, fontWeight: 600 },
+
+  note: {
+    background: "#fefbf0", border: `1px solid #f0e5b5`,
+    borderRadius: 9, padding: "8px 12px",
+    display: "flex", gap: 6, alignItems: "flex-start",
+  },
+  noteQ:   { color: GOLD, fontSize: 20, lineHeight: 0.8, fontFamily: "'Cormorant Garamond', serif" },
+  noteTxt: { fontSize: 12, color: "#7a6520", lineHeight: 1.5, fontStyle: "italic" },
+
+  totalRow: {
+    display: "flex", justifyContent: "space-between", alignItems: "center",
+    borderTop: `1px solid ${SAND}`, paddingTop: 10,
+  },
+  totalLbl: { fontSize: 12, color: MUTED },
+  totalAmt: {
+    fontSize: 18, fontWeight: 700,
+    fontFamily: "'Cormorant Garamond', serif",
+    color: DARK, letterSpacing: -0.3,
+  },
+
+  actions: { display: "flex", gap: 8 },
+  doneBtn: {
+    flex: 1,
+    background: GREEN, color: "#fff",
+    border: "none", borderRadius: 10,
+    padding: "11px 16px", fontSize: 12, fontWeight: 700,
+    cursor: "pointer", letterSpacing: 0.4,
+    transition: "opacity 0.15s, transform 0.1s",
+  },
+  doneTag: {
+    flex: 1, textAlign: "center",
+    fontSize: 12, fontWeight: 600, color: GREEN,
+    background: "#eef6f0", borderRadius: 10,
+    padding: "11px", border: "1px solid #b8dfc3",
+  },
+  delBtn: {
+    width: 38, height: 38,
+    background: "#fff5f5", border: "1px solid #fdd5d5",
+    color: "#cc4444", borderRadius: 10,
+    cursor: "pointer", display: "flex",
+    alignItems: "center", justifyContent: "center", flexShrink: 0,
+  },
+
+  // ── Empty ─────────────────────────────────────────────────────────────
+  empty: {
+    display: "flex", flexDirection: "column",
+    alignItems: "center", justifyContent: "center",
+    padding: 100, gap: 12,
+  },
+  emptyIcon:  { fontSize: 48, color: SAND },
+  emptyTitle: { fontSize: 16, fontWeight: 600, color: MID },
+  emptySub:   { fontSize: 13, color: MUTED },
+
+  // ── Modal ─────────────────────────────────────────────────────────────
+  modalBg: {
+    position: "fixed", inset: 0,
+    background: "rgba(28,20,16,0.55)",
+    zIndex: 999,
+    display: "flex", alignItems: "center", justifyContent: "center",
+    backdropFilter: "blur(4px)",
+  },
+  modal: {
+    background: "#fff", borderRadius: 20,
+    padding: "32px 36px", width: 360,
+    textAlign: "center",
+    boxShadow: "0 24px 80px rgba(28,20,16,0.2)",
+  },
+  modalIcon: {
+    width: 48, height: 48, borderRadius: "50%",
+    background: "#fff5f5", color: "#cc4444",
+    display: "flex", alignItems: "center", justifyContent: "center",
+    fontSize: 18, margin: "0 auto 16px",
+    border: "1px solid #fdd5d5",
+  },
+  modalTitle: {
+    fontFamily: "'Cormorant Garamond', serif",
+    fontSize: 20, fontWeight: 600, color: DARK, marginBottom: 8,
+  },
+  modalSub:  { fontSize: 13, color: MID, lineHeight: 1.6, marginBottom: 24 },
+  modalBtns: { display: "flex", gap: 10 },
+  btnCancel: {
+    flex: 1, background: CREAM, border: `1px solid ${SAND}`,
+    borderRadius: 12, padding: 13,
+    fontSize: 14, fontWeight: 600, cursor: "pointer", color: MID,
+  },
+  btnDel: {
+    flex: 1, background: "#cc4444", border: "none",
+    borderRadius: 12, padding: 13,
+    fontSize: 14, fontWeight: 700, cursor: "pointer", color: "#fff",
+  },
 };
